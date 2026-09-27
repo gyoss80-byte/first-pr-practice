@@ -15,6 +15,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +59,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -190,6 +193,13 @@ class PrompterController(
 
     override fun onFinal(text: String) {
         if (tracker.onFinal(text)) moved()
+        // Recognizers often swallow the last word or two. If the speaker finishes talking with
+        // at most two words left, treat the script as read.
+        if (phase == Phase.Listening && !tracker.isDone && tracker.wordCount - 1 - tracker.wordCursor <= 2) {
+            tracker.jumpTo(Int.MAX_VALUE)
+            sync()
+            stop(Phase.Done)
+        }
     }
 
     override fun onLevel(level: Float) {
@@ -478,7 +488,12 @@ fun PrompterScreen(
             .fillMaxSize()
             .background(Color.Black)
             .pointerInput(Unit) {
-                detectTapGestures { if (controlsVisible && controller.running) controlsVisible = false else showControls() }
+                // Any touch anywhere brings up the controls. This runs in the Initial pass, before
+                // the text or the camera preview can claim the touch, and never consumes it.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    showControls()
+                }
             },
     ) {
         if (cameraOn) {
