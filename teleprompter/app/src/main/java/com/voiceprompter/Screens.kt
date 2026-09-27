@@ -55,6 +55,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.voiceprompter.tracker.ReadTime
 import com.voiceprompter.tracker.Sensitivity
 import kotlin.math.roundToInt
 
@@ -95,6 +96,7 @@ private fun Label(text: String) {
 @Composable
 fun ScriptListScreen(
     store: ScriptStore,
+    settings: PrompterSettings,
     onOpen: (Script) -> Unit,
     onSettings: () -> Unit,
 ) {
@@ -128,6 +130,7 @@ fun ScriptListScreen(
                 if (index > 0) HorizontalDivider(color = Rule)
                 ScriptRow(
                     script = script,
+                    settings = settings,
                     onOpen = { onOpen(script) },
                     onDuplicate = { store.duplicate(script.id) },
                     onDelete = { confirmDelete = script },
@@ -153,7 +156,13 @@ fun ScriptListScreen(
 }
 
 @Composable
-private fun ScriptRow(script: Script, onOpen: () -> Unit, onDuplicate: () -> Unit, onDelete: () -> Unit) {
+private fun ScriptRow(
+    script: Script,
+    settings: PrompterSettings,
+    onOpen: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 14.dp),
@@ -162,7 +171,14 @@ private fun ScriptRow(script: Script, onOpen: () -> Unit, onDuplicate: () -> Uni
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(script.displayTitle, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, maxLines = 2)
             val edited = DateUtils.getRelativeTimeSpanString(script.updatedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)
-            Text("${script.lang.label} · Edited $edited", color = Dim, fontSize = 14.sp)
+            val readTime = remember(script.text, script.lang, settings.paceEn, settings.paceEs) {
+                settings.readTimeLabel(script)
+            }
+            Text(
+                listOfNotNull(script.lang.label, readTime, "Edited $edited").joinToString(" · "),
+                color = Dim,
+                fontSize = 14.sp,
+            )
         }
         Box {
             TextButton(onClick = { menu = true }) { Text("•••", color = Dim) }
@@ -201,7 +217,13 @@ private fun guessLang(text: String): Lang {
 // ---------------------------------------------------------------- Editor
 
 @Composable
-fun EditorScreen(script: Script, onChange: (Script) -> Unit, onStart: () -> Unit, onBack: () -> Unit) {
+fun EditorScreen(
+    script: Script,
+    settings: PrompterSettings,
+    onChange: (Script) -> Unit,
+    onStart: () -> Unit,
+    onBack: () -> Unit,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -238,6 +260,15 @@ fun EditorScreen(script: Script, onChange: (Script) -> Unit, onStart: () -> Unit
             textStyle = TextStyle(fontSize = 18.sp, lineHeight = 26.sp, color = Color.White),
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
+        val words = ReadTime.spokenWords(script.text)
+        if (words > 0) {
+            val readTime = settings.readTimeLabel(script)
+            Text(
+                listOfNotNull(readTime?.replaceFirstChar { it.uppercase() }, "$words words").joinToString(" · "),
+                color = Dim,
+                fontSize = 14.sp,
+            )
+        }
         Button(
             onClick = onStart,
             enabled = script.text.isNotBlank(),
@@ -332,6 +363,38 @@ fun SettingsScreen(
         OutlinedButton(onClick = onMicTest, modifier = Modifier.fillMaxWidth()) {
             Text("Test recognition", color = Color.White)
         }
+
+        HorizontalDivider(color = Rule)
+        Label("Pace")
+        SwitchRow("Show pace while reading", "Words per minute, with a warning when you rush.", settings.showPace) {
+            onChange(settings.copy(showPace = it))
+        }
+        SliderRow("Target pace", "${settings.targetPace.roundToInt()} wpm", settings.targetPace, 100f..200f) {
+            onChange(settings.copy(targetPace = it.roundToInt().toFloat()))
+        }
+        Text(
+            "\"Slow down\" appears when you go more than 10% over the target. Around 150 wpm is a comfortable pace on camera.",
+            color = Dim, fontSize = 14.sp,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Your measured pace", color = Color.White, fontSize = 16.sp)
+                Text(
+                    Lang.entries.joinToString("  ·  ") { lang ->
+                        "${lang.label} " + (settings.measuredPace(lang)?.let { "$it wpm" } ?: "not yet")
+                    },
+                    color = Dim, fontSize = 14.sp,
+                )
+            }
+            TextButton(
+                onClick = { onChange(settings.copy(paceEn = 0, paceEs = 0)) },
+                enabled = settings.paceEn > 0 || settings.paceEs > 0,
+            ) { Text("Reset") }
+        }
+        Text(
+            "Learned from your readings and used for the read-time estimates.",
+            color = Dim, fontSize = 14.sp,
+        )
 
         HorizontalDivider(color = Rule)
         Label("Auto-scroll")

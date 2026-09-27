@@ -3,6 +3,7 @@ package com.voiceprompter
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -66,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.voiceprompter.tracker.PaceMeter
 import com.voiceprompter.tracker.ScriptTracker
 import com.voiceprompter.tracker.Sensitivity
 import com.voiceprompter.tracker.TokenKind
@@ -95,6 +97,13 @@ class PrompterController(
         private set
     var error by mutableStateOf<String?>(null)
 
+    private val pace = PaceMeter()
+    private var lastWord = tracker.wordCursor
+
+    /** Live speaking pace in words per minute, or null until there's enough speech. */
+    var wordsPerMinute by mutableStateOf<Int?>(null)
+        private set
+
     val running: Boolean
         get() = phase == Phase.Preparing || phase == Phase.Countdown ||
             phase == Phase.Listening || phase == Phase.Scrolling
@@ -123,12 +132,15 @@ class PrompterController(
 
     fun stop(next: Phase = Phase.Paused) {
         engine.stop()
+        pace.pause()
         level = 0f
         phase = next
     }
 
     fun jumpTo(tokenIndex: Int) {
         tracker.jumpTo(tokenIndex)
+        pace.pause()
+        lastWord = tracker.wordCursor
         sync()
         if (phase == Phase.Done) phase = Phase.Paused
     }
@@ -136,6 +148,8 @@ class PrompterController(
     fun restart() {
         if (running) stop()
         tracker.restart()
+        pace.pause()
+        lastWord = tracker.wordCursor
         sync()
         phase = Phase.Idle
     }
@@ -145,7 +159,13 @@ class PrompterController(
         nextToken = tracker.nextToken
     }
 
+    /** This session's average pace, once; null if too little was read to trust it. */
+    fun takeSessionPace(): Int? = pace.sessionWordsPerMinute.also { pace.clearSession() }
+
     private fun moved() {
+        pace.onAdvance(tracker.wordCursor - lastWord, SystemClock.elapsedRealtime())
+        lastWord = tracker.wordCursor
+        wordsPerMinute = pace.wordsPerMinute
         sync()
         if (tracker.isDone) stop(Phase.Done)
     }
@@ -173,6 +193,7 @@ fun PrompterScreen(
     script: Script,
     settings: PrompterSettings,
     onSettingsChange: (PrompterSettings) -> Unit,
+    onPaceMeasured: (Lang, Int) -> Unit,
     engine: SpeechEngine,
     foreground: Boolean,
     onBack: () -> Unit,
@@ -180,7 +201,16 @@ fun PrompterScreen(
     val controller = remember(script.id, script.text, script.lang, settings.sensitivity) {
         PrompterController(script, settings.sensitivity, engine)
     }
-    DisposableEffect(controller) { onDispose { engine.stop() } }
+    fun savePace() {
+        controller.takeSessionPace()?.let { onPaceMeasured(script.lang, it) }
+    }
+    DisposableEffect(controller) {
+        onDispose {
+            engine.stop()
+            savePace()
+        }
+    }
+    LaunchedEffect(controller.phase) { if (controller.phase == Phase.Done) savePace() }
     ImmersiveMode()
 
     val context = LocalContext.current
@@ -383,11 +413,17 @@ fun PrompterScreen(
             }
         }
 
-        MicIndicator(
-            listening = phase == Phase.Listening,
-            level = controller.level,
-            modifier = Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(14.dp),
-        )
+        Column(
+            Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(14.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            MicIndicator(listening = phase == Phase.Listening, level = controller.level)
+            val wpm = controller.wordsPerMinute
+            if (settings.showPace && !autoMode && phase == Phase.Listening && wpm != null) {
+                PacePill(wpm, settings.targetPace.toInt(), highlight)
+            }
+        }
 
         CenterMessage(
             controller, countdown, highlight,
@@ -522,6 +558,22 @@ private fun PlayButton(playing: Boolean, color: Color, onClick: () -> Unit) {
             }
         }
     }
+}
+
+/** Live words per minute; turns into a "Slow down" warning when you're over the target. */
+@Composable
+private fun PacePill(wpm: Int, target: Int, highlight: Color) {
+    val fast = wpm > target * 1.1
+    Text(
+        if (fast) "Slow down · $wpm wpm" else "$wpm wpm",
+        color = if (fast) Color.Black else Color(0xFFD5D8DD),
+        fontSize = 15.sp,
+        fontWeight = if (fast) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (fast) highlight else Panel)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    )
 }
 
 /** A dot plus five bars: green and moving when the mic hears you. */

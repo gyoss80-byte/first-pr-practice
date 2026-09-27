@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import com.voiceprompter.tracker.ReadTime
 
 private sealed interface Screen {
     data object List : Screen
@@ -66,6 +67,7 @@ class MainActivity : ComponentActivity() {
         when (val s = screen) {
             Screen.List -> ScriptListScreen(
                 store = scripts,
+                settings = settings,
                 onOpen = { screen = Screen.Editor(it.id) },
                 onSettings = { screen = Screen.Settings },
             )
@@ -77,6 +79,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     EditorScreen(
                         script = script,
+                        settings = settings,
                         onChange = scripts::update,
                         onStart = { screen = Screen.Prompter(s.id) },
                         onBack = ::back,
@@ -93,6 +96,9 @@ class MainActivity : ComponentActivity() {
                         script = script,
                         settings = settings,
                         onSettingsChange = ::updateSettings,
+                        onPaceMeasured = { lang, wpm ->
+                            updateSettings(settings.withMeasuredPace(lang, ReadTime.learn(settings.measuredPace(lang), wpm)))
+                        },
                         engine = engine,
                         foreground = foreground,
                         onBack = ::back,

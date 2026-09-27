@@ -2,6 +2,7 @@ package com.voiceprompter
 
 import android.content.Context
 import androidx.compose.runtime.mutableStateListOf
+import com.voiceprompter.tracker.ReadTime
 import com.voiceprompter.tracker.Sensitivity
 import org.json.JSONArray
 import org.json.JSONObject
@@ -106,7 +107,26 @@ data class PrompterSettings(
     val autoScroll: Boolean = false,
     /** Auto-scroll speed in dp per second. */
     val autoSpeed: Float = 40f,
+    val showPace: Boolean = true,
+    /** Words per minute; the pace indicator warns above this. */
+    val targetPace: Float = 150f,
+    /** Measured personal pace per language, in words per minute; 0 until measured. */
+    val paceEn: Int = 0,
+    val paceEs: Int = 0,
 ) {
+    fun measuredPace(lang: Lang): Int? = (if (lang == Lang.ES) paceEs else paceEn).takeIf { it > 0 }
+
+    fun withMeasuredPace(lang: Lang, wpm: Int) =
+        if (lang == Lang.ES) copy(paceEs = wpm) else copy(paceEn = wpm)
+
+    /** "about 2:40 at your pace", using the measured pace when there is one. */
+    fun readTimeLabel(script: Script): String? {
+        val measured = measuredPace(script.lang)
+        val seconds = ReadTime.estimateSeconds(script.text, measured ?: ReadTime.DEFAULT_WPM)
+        if (seconds == 0) return null
+        return "about ${ReadTime.format(seconds)}" + if (measured != null) " at your pace" else ""
+    }
+
     companion object {
         val TEXT_COLORS = listOf(0xFFF2EFE6.toInt(), 0xFFFFFFFF.toInt(), 0xFFFFE680.toInt(), 0xFF9BE8A6.toInt())
         val HIGHLIGHT_COLORS = listOf(0xFFFFB020.toInt(), 0xFF4FC3F7.toInt(), 0xFF66E08A.toInt(), 0xFFFF7AB6.toInt())
@@ -131,6 +151,10 @@ class SettingsStore(context: Context) {
                 .getOrDefault(d.sensitivity),
             autoScroll = prefs.getBoolean("autoScroll", d.autoScroll),
             autoSpeed = prefs.getFloat("autoSpeed", d.autoSpeed),
+            showPace = prefs.getBoolean("showPace", d.showPace),
+            targetPace = prefs.getFloat("targetPace", d.targetPace),
+            paceEn = prefs.getInt("paceEn", d.paceEn),
+            paceEs = prefs.getInt("paceEs", d.paceEs),
         )
     }
 
@@ -147,6 +171,10 @@ class SettingsStore(context: Context) {
             .putString("sensitivity", s.sensitivity.name)
             .putBoolean("autoScroll", s.autoScroll)
             .putFloat("autoSpeed", s.autoSpeed)
+            .putBoolean("showPace", s.showPace)
+            .putFloat("targetPace", s.targetPace)
+            .putInt("paceEn", s.paceEn)
+            .putInt("paceEs", s.paceEs)
             .apply()
     }
 }
