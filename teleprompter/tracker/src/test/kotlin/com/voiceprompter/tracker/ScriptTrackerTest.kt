@@ -83,6 +83,39 @@ class ScriptTrackerTest {
     }
 
     @Test
+    fun `ad-lib using words from further ahead does not jump`() {
+        val r = Recorder(tracker(english))
+        r.say(englishSpoken[0])
+        val held = r.t.wordCursor
+        r.say("honestly i love options trading")
+        r.say("the premium is my favorite part")
+        assertEquals(held, r.t.wordCursor)
+        r.say(englishSpoken[1])
+        assertEquals(endOfSentence(english, 1), r.t.wordCursor)
+    }
+
+    @Test
+    fun `ad-lib using words already read does not jump back`() {
+        val r = Recorder(tracker(english))
+        englishSpoken.take(3).forEach(r::say)
+        val held = r.t.wordCursor
+        r.say("and again how the premium works is key")
+        r.say("so remember that this is important")
+        assertEquals(held, r.t.wordCursor)
+        r.say(englishSpoken[3])
+        assertEquals(endOfSentence(english, 3), r.t.wordCursor)
+    }
+
+    @Test
+    fun `lagging a couple of words behind still catches up`() {
+        val r = Recorder(tracker(english))
+        r.say(englishSpoken[0])
+        // The recognizer missed "today we"; the reader is already further on.
+        r.say("are going to talk about options")
+        assertTrue(r.t.wordCursor >= endOfSentence(english, 0) + 6, "at ${r.t.wordCursor}")
+    }
+
+    @Test
     fun `skipping a sentence jumps forward`() {
         val r = Recorder(tracker(english))
         r.say(englishSpoken[0])

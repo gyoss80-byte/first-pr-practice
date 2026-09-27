@@ -15,6 +15,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -407,11 +408,30 @@ fun PrompterScreen(
         }
     }
 
+    // Hand scrolling works at any time. While a finger moves the text, the prompter stops
+    // following; once the scroll settles, reading continues from the line on the cue arrow.
+    val dragging by scroll.interactionSource.collectIsDraggedAsState()
+    var handScrolled by remember { mutableStateOf(false) }
+    LaunchedEffect(dragging) { if (dragging) handScrolled = true }
+    LaunchedEffect(handScrolled, dragging, scroll.isScrollInProgress) {
+        if (!handScrolled || dragging || scroll.isScrollInProgress) return@LaunchedEffect
+        handScrolled = false
+        val l = layout
+        if (!autoMode && l != null) {
+            val lineMiddle = with(density) { (settings.fontSize * settings.lineSpacing).sp.toPx() } / 2
+            val offset = l.getOffsetForPosition(Offset(0f, scroll.value + lineMiddle))
+            val index = tokens.indexOfFirst { it.end > offset }
+            if (index >= 0) controller.jumpTo(index)
+        }
+    }
+
     // Voice mode: keep the next word's line on the cue line.
     val focus = if (controller.nextToken >= 0) controller.nextToken else controller.cursorToken
     val target = if (autoMode) 0 else lineTopOf(focus)
-    LaunchedEffect(target, autoMode) {
-        if (!autoMode) scroll.animateScrollTo(target, tween(320, easing = FastOutSlowInEasing))
+    LaunchedEffect(target, autoMode, handScrolled) {
+        if (!autoMode && !handScrolled && !dragging) {
+            scroll.animateScrollTo(target, tween(320, easing = FastOutSlowInEasing))
+        }
     }
 
     // Auto-scroll mode: fixed speed until the last line reaches the cue line.
@@ -423,7 +443,7 @@ fun PrompterScreen(
             val now = withFrameNanos { it }
             val px = with(density) { speed.dp.toPx() } * (now - last) / 1_000_000_000f
             last = now
-            scroll.dispatchRawDelta(px)
+            if (!dragging) scroll.dispatchRawDelta(px)
             val l = layout ?: continue
             if (scroll.value >= l.getLineTop(l.lineCount - 1)) {
                 controller.phase = Phase.Done
@@ -483,7 +503,7 @@ fun PrompterScreen(
                 .clipToBounds()
                 .graphicsLayer { scaleX = if (settings.mirror && !cameraOn) -1f else 1f },
         ) {
-            Column(Modifier.fillMaxSize().verticalScroll(scroll, enabled = phase != Phase.Listening && phase != Phase.Scrolling)) {
+            Column(Modifier.fillMaxSize().verticalScroll(scroll)) {
                 Spacer(Modifier.height(cue))
                 Text(
                     text,

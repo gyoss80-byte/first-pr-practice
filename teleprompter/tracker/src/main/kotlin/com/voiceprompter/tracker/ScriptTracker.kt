@@ -22,12 +22,13 @@ data class Token(val text: String, val start: Int, val end: Int, val kind: Token
 /**
  * How closely speech must match the script.
  * [similarity] is the per-word Levenshtein ratio that counts as a match; [advanceRun] and
- * [backRun] are how many matching words it takes to move forward or backward.
+ * [backRun] are how many matching words it takes to move forward, or words in a row to move
+ * backward.
  */
 enum class Sensitivity(val similarity: Double, val advanceRun: Int, val backRun: Int) {
     RELAXED(0.65, 2, 4),
-    NORMAL(0.75, 2, 4),
-    STRICT(0.85, 3, 5),
+    NORMAL(0.75, 2, 5),
+    STRICT(0.85, 3, 6),
 }
 
 /**
@@ -122,7 +123,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         var best = Match.NONE
         for (j in lo..hi) {
             val m = align(tail, j)
-            if (!qualifies(j, m, allowBack)) continue
+            if (!qualifies(j, m, allowBack) { run(tail, j) }) continue
             val pos = bestPos
             if (pos == null || m.matches > best.matches ||
                 (m.matches == best.matches && closer(j, pos))
@@ -134,18 +135,47 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         return bestPos
     }
 
-    private fun qualifies(j: Int, m: Match, allowBack: Boolean): Boolean {
+    /**
+     * Normal reading continues from the cursor, so a match that picks up right where the
+     * cursor is may move it with a little slack. Anything else (the speaker ad-libbing with
+     * the script's own words, or skipping ahead or back) needs several exact words in a row:
+     * more the further it would jump. [run] is computed only when needed.
+     */
+    private fun qualifies(j: Int, m: Match, allowBack: Boolean, run: () -> Int): Boolean {
         if (m.matches == 0 || m.content == 0) return false // stopwords alone never place the cursor
         return when {
             j == wordCursor -> true
-            j < wordCursor -> allowBack && m.matches >= sensitivity.backRun && wordCursor - j <= BACK_WINDOW
+            j < wordCursor -> allowBack && wordCursor - j <= BACK_WINDOW && run() >= sensitivity.backRun
             else -> {
                 val remaining = words.size - (wordCursor + 1)
-                var need = if (remaining < 2) 1 else sensitivity.advanceRun
-                if (j - wordCursor > FAR_JUMP) need++
-                m.matches >= need
+                val need = if (remaining < 2) 1 else sensitivity.advanceRun
+                val continues = m.first - wordCursor <= CONTINUE_SLACK
+                when {
+                    continues && j - wordCursor <= FAR_JUMP -> m.matches >= need
+                    j - wordCursor <= FAR_JUMP -> run() >= need + 1
+                    else -> run() >= need + 2
+                }
             }
         }
+    }
+
+    /** Exact consecutive matches ending on script word [j] (containing a content word). */
+    private fun run(tail: List<String>, j: Int): Int {
+        var best = 0
+        for (skip in 0..1) {
+            var si = tail.lastIndex - skip
+            var wi = j
+            var n = 0
+            var content = false
+            while (si >= 0 && wi >= 0 && similar(tail[si], words[wi])) {
+                n++
+                if (!isStopword(words[wi])) content = true
+                si--
+                wi--
+            }
+            if (content) best = max(best, n)
+        }
+        return best
     }
 
     /** On a tie, prefer the position nearest the cursor, and moving forward over holding. */
@@ -165,7 +195,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         for (skip in 0..1) {
             val si = tail.lastIndex - skip
             if (si < 0 || !similar(tail[si], words[j])) continue
-            val m = extend(tail, si - 1, j - 1, MAX_GAPS - skip).plus(isStopword(words[j]))
+            val m = extend(tail, si - 1, j - 1, MAX_GAPS - skip).plus(j, isStopword(words[j]))
             if (m > best) best = m
         }
         return best
@@ -175,7 +205,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         if (si < 0 || wi < 0) return Match.NONE
         var best = Match.NONE
         if (similar(tail[si], words[wi])) {
-            best = extend(tail, si - 1, wi - 1, gaps).plus(isStopword(words[wi]))
+            best = extend(tail, si - 1, wi - 1, gaps).plus(wi, isStopword(words[wi]))
         }
         if (gaps > 0) {
             val skipSpoken = extend(tail, si - 1, wi, gaps - 1)
@@ -193,13 +223,16 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         return ratio >= sensitivity.similarity
     }
 
-    private data class Match(val matches: Int, val content: Int) : Comparable<Match> {
-        fun plus(stopword: Boolean) = Match(matches + 1, content + if (stopword) 0 else 1)
+    /** [first] is the earliest script word in the alignment. */
+    private data class Match(val matches: Int, val content: Int, val first: Int) : Comparable<Match> {
+        fun plus(index: Int, stopword: Boolean) =
+            Match(matches + 1, content + if (stopword) 0 else 1, min(first, index))
+
         override fun compareTo(other: Match) =
             compareValuesBy(this, other, Match::matches, Match::content)
 
         companion object {
-            val NONE = Match(0, 0)
+            val NONE = Match(0, 0, Int.MAX_VALUE)
         }
     }
 
@@ -209,6 +242,9 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         private const val FORWARD_WINDOW = 40
         private const val BACK_WINDOW = 30
         private const val FAR_JUMP = 12
+
+        /** How far past the cursor a match may start and still count as reading on. */
+        private const val CONTINUE_SLACK = 2
 
         private val STOPWORDS = setOf(
             // English
