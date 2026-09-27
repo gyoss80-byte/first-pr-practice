@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "VoicePrompter"
-include(":app")
+include(":app", ":tracker")

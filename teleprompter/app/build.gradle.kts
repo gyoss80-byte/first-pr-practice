@@ -14,8 +14,8 @@ android {
         applicationId = "com.voiceprompter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
         // Phones are ARM; dropping the x86 speech libraries keeps the APK smaller.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
@@ -42,6 +42,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(project(":tracker"))
     implementation("com.alphacephei:vosk-android:0.3.75")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
 

@@ -40,7 +40,7 @@ jobs:
         run: ./scripts/fetch-models.sh
 
       - name: Build APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew :tracker:test assembleDebug --stacktrace
 
       - name: Name the APK
         run: cp app/build/outputs/apk/debug/app-debug.apk Prompter.apk

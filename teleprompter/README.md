@@ -3,10 +3,18 @@
 An Android teleprompter that scrolls with your voice, offline, in English and Spanish.
 Speech recognition runs on the phone with [Vosk](https://alphacephei.com/vosk/android); the app has no internet permission.
 
-## Status
+## What it does
 
-Build step 2 of the spec: a **recognition test screen** that shows what the phone hears, live.
-Test it in English and Spanish before the prompter itself is built.
+- **Scripts:** a list of saved scripts (new, duplicate, delete, import a `.txt` file). Two sample scripts, one English and one Spanish, are there on first launch.
+- **Editor:** title, English/Spanish, and the script text. Put stage notes in brackets, like `[pause]`; they show in blue and are never matched.
+- **Prompter:** full screen, black background, and the screen stays on. The next word to read is highlighted on the cue line, and words already read are dimmed. Tap any word to jump there. The controls hide after 3 seconds; tap the screen to bring them back.
+- **Settings:** font size, line spacing, side margins, colors, cue line position, mirror mode, countdown, matching sensitivity, and an auto-scroll mode that doesn't use the microphone.
+
+The voice-following logic lives in `tracker/` (`ScriptTracker`), a plain Kotlin module with unit tests:
+
+```bash
+./gradlew :tracker:test
+```
 
 ## Installing on your phone
 

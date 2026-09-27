@@ -1,11 +1,10 @@
 package com.voiceprompter
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import org.json.JSONObject
-import org.vosk.android.RecognitionListener
 
 sealed interface ModelStatus {
     data object Preparing : ModelStatus
@@ -13,7 +12,7 @@ sealed interface ModelStatus {
     data class Failed(val message: String) : ModelStatus
 }
 
-/** State for the recognition test screen: shows live Vosk partial and final results. */
+/** State for the recognition test screen: shows live partial and final results. */
 class RecognitionTest(private val engine: SpeechEngine) {
     var lang by mutableStateOf(Lang.EN)
         private set
@@ -23,23 +22,28 @@ class RecognitionTest(private val engine: SpeechEngine) {
         private set
     var partial by mutableStateOf("")
         private set
+    var level by mutableFloatStateOf(0f)
+        private set
     val phrases = mutableStateListOf<String>()
 
-    private val listener = object : RecognitionListener {
-        override fun onPartialResult(hypothesis: String?) {
-            partial = field(hypothesis, "partial")
+    private val listener = object : SpeechListener {
+        override fun onPartial(text: String) {
+            partial = text
         }
 
-        override fun onResult(hypothesis: String?) = addPhrase(hypothesis)
+        override fun onFinal(text: String) {
+            if (text.isNotBlank()) phrases.add(0, text)
+            partial = ""
+        }
 
-        override fun onFinalResult(hypothesis: String?) = addPhrase(hypothesis)
+        override fun onLevel(level: Float) {
+            this@RecognitionTest.level = level
+        }
 
-        override fun onError(exception: Exception?) {
+        override fun onError(message: String) {
             stopListening()
-            status = ModelStatus.Failed(exception?.message ?: "The microphone stopped unexpectedly.")
+            status = ModelStatus.Failed(message)
         }
-
-        override fun onTimeout() = stopListening()
     }
 
     fun prepare() {
@@ -68,19 +72,11 @@ class RecognitionTest(private val engine: SpeechEngine) {
         engine.stop()
         listening = false
         partial = ""
+        level = 0f
     }
 
     fun clear() {
         phrases.clear()
         partial = ""
     }
-
-    private fun addPhrase(hypothesis: String?) {
-        val text = field(hypothesis, "text")
-        if (text.isNotBlank()) phrases.add(0, text)
-        partial = ""
-    }
-
-    private fun field(json: String?, key: String): String =
-        json?.let { runCatching { JSONObject(it).optString(key) }.getOrNull() }.orEmpty()
 }
