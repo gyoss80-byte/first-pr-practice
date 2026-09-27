@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# Speech models are downloaded by scripts/fetch-models.sh (about 80 MB), not committed.
+app/src/main/assets/model-*/

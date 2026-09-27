@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A prompter screen: read lines dimmed, the current line with its next word
+     highlighted, and the amber cue arrow. Drawn inside the 66dp adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Already read -->
+    <path
+        android:pathData="M39,39 L75,39"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeColor="#4A505A" />
+    <!-- Next word, highlighted -->
+    <path
+        android:pathData="M39,54 L50,54"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:strokeColor="#FFB020" />
+    <!-- Rest of the current line -->
+    <path
+        android:pathData="M58,54 L81,54"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeColor="#F2EFE6" />
+    <!-- Coming up -->
+    <path
+        android:pathData="M39,69 L68,69"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeColor="#B9BEC6" />
+    <!-- Cue arrow -->
+    <path
+        android:pathData="M23,47 L31,54 L23,61 Z"
+        android:fillColor="#FFB020" />
+</vector>
