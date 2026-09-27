@@ -345,6 +345,25 @@ fun SettingsScreen(
         }
 
         HorizontalDivider(color = Rule)
+        Label("Camera")
+        Text(
+            "Tap Camera on the prompter screen to read and record yourself at the same time. " +
+                "The script sits in a band at the top, near the front camera.",
+            color = Dim, fontSize = 14.sp,
+        )
+        Text("Default camera", color = Color.White, fontSize = 16.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = settings.cameraFront, onClick = { onChange(settings.copy(cameraFront = true)) }, label = { Text("Front") })
+            FilterChip(selected = !settings.cameraFront, onClick = { onChange(settings.copy(cameraFront = false)) }, label = { Text("Back") })
+        }
+        SliderRow("Script band height", "${(settings.cameraBand * 100).roundToInt()}% of the screen", settings.cameraBand, 0.2f..0.7f) {
+            onChange(settings.copy(cameraBand = it))
+        }
+        SliderRow("Band darkness", "${(settings.bandOpacity * 100).roundToInt()}%", settings.bandOpacity, 0f..0.9f) {
+            onChange(settings.copy(bandOpacity = it))
+        }
+
+        HorizontalDivider(color = Rule)
         Label("Voice following")
         Text("Matching sensitivity", color = Color.White, fontSize = 16.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

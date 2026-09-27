@@ -28,6 +28,13 @@ interface SpeechListener {
     /** Microphone loudness from 0 to 1, about ten times a second. */
     fun onLevel(level: Float) {}
     fun onError(message: String)
+
+    /**
+     * The mic has delivered pure digital silence for a few seconds. Real microphones always
+     * pick up some noise, so this means Android is giving the audio to someone else (for
+     * example, the video recording) and recognition can't hear the speaker.
+     */
+    fun onSilenced() {}
 }
 
 /**
@@ -98,6 +105,7 @@ class SpeechEngine(private val context: Context) {
         running = flag
         thread = Thread({
             val buffer = ShortArray(CHUNK)
+            var silentChunks = 0
             try {
                 record.startRecording()
                 while (flag.get()) {
@@ -107,6 +115,11 @@ class SpeechEngine(private val context: Context) {
                         break
                     }
                     if (n == 0) continue
+                    if ((0 until n).all { buffer[it].toInt() == 0 }) {
+                        if (++silentChunks == SILENCED_CHUNKS) post { listener.onSilenced() }
+                    } else {
+                        silentChunks = 0
+                    }
                     val level = level(buffer, n)
                     val final = rec.acceptWaveForm(buffer, n)
                     val text = if (final) field(rec.result, "text") else field(rec.partialResult, "partial")
@@ -159,5 +172,6 @@ class SpeechEngine(private val context: Context) {
     private companion object {
         const val SAMPLE_RATE = 16000
         const val CHUNK = 1600 // 0.1 s of audio
+        const val SILENCED_CHUNKS = 30 // 3 s of exact zeros
     }
 }

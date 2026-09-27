@@ -3,7 +3,10 @@ package com.voiceprompter
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
+import androidx.activity.ComponentActivity
+import androidx.camera.view.PreviewView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -47,6 +50,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -64,6 +68,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.voiceprompter.tracker.ReadTime
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -80,6 +86,7 @@ enum class Phase { Idle, Preparing, Countdown, Listening, Paused, Scrolling, Don
 private val NoteColor = Color(0xFF7FA7FF)
 private val Panel = Color(0xE6161A20)
 private val Listening = Color(0xFF4CD37A)
+private val RecordRed = Color(0xFFE5383B)
 
 /** Connects the speech engine to the script tracker for one prompter session. */
 class PrompterController(
@@ -102,6 +109,10 @@ class PrompterController(
 
     /** Live speaking pace in words per minute, or null until there's enough speech. */
     var wordsPerMinute by mutableStateOf<Int?>(null)
+        private set
+
+    /** Android is giving the mic to someone else (like the video recording), so we hear silence. */
+    var micBlocked by mutableStateOf(false)
         private set
 
     val running: Boolean
@@ -127,6 +138,7 @@ class PrompterController(
 
     fun startListening() {
         error = null
+        micBlocked = false
         phase = if (engine.start(script.lang, this)) Phase.Listening else Phase.Paused
     }
 
@@ -186,6 +198,10 @@ class PrompterController(
         error = message
         stop()
     }
+
+    override fun onSilenced() {
+        micBlocked = true
+    }
 }
 
 @Composable
@@ -225,6 +241,13 @@ fun PrompterScreen(
     val autoMode = settings.autoScroll
     val tokens = controller.tracker.tokens
     val phase = controller.phase
+
+    val camera = remember { PrompterCamera(context.applicationContext) }
+    DisposableEffect(camera) { onDispose { camera.release() } }
+    fun granted(permission: String) = context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    var hasCamera by remember { mutableStateOf(granted(Manifest.permission.CAMERA)) }
+    val cameraOn = settings.cameraOn && hasCamera
+    var pendingRecord by remember { mutableStateOf(false) }
 
     fun beginListening() {
         controller.prepare {
@@ -273,6 +296,73 @@ fun PrompterScreen(
         controller.stop()
     }
 
+    val recordPermissions = buildList {
+        add(Manifest.permission.CAMERA)
+        add(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }.toTypedArray()
+    val cameraPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        if (result[Manifest.permission.CAMERA] == true) {
+            hasCamera = true
+            onSettingsChange(settings.copy(cameraOn = true))
+        } else {
+            controller.error = "Prompter needs camera access to show and record video. Allow it in " +
+                "Settings → Apps → Prompter → Permissions."
+        }
+    }
+
+    fun toggleCamera() {
+        when {
+            camera.isRecording -> return
+            settings.cameraOn && hasCamera -> onSettingsChange(settings.copy(cameraOn = false))
+            recordPermissions.all(::granted) -> {
+                hasCamera = true
+                onSettingsChange(settings.copy(cameraOn = true))
+            }
+            else -> cameraPermissions.launch(recordPermissions)
+        }
+    }
+
+    /** Record starts the recording and the prompter together, after the countdown. */
+    fun record() {
+        if (camera.isRecording) {
+            camera.stop()
+            pause()
+            return
+        }
+        if (!recordPermissions.all(::granted)) {
+            cameraPermissions.launch(recordPermissions)
+            return
+        }
+        if (controller.phase == Phase.Listening || controller.phase == Phase.Scrolling) {
+            camera.start()
+        } else {
+            pendingRecord = true
+            play()
+        }
+    }
+    LaunchedEffect(phase, pendingRecord) {
+        if (!pendingRecord) return@LaunchedEffect
+        when (phase) {
+            Phase.Listening, Phase.Scrolling -> {
+                pendingRecord = false
+                camera.start()
+            }
+            Phase.Paused -> pendingRecord = false
+            else -> {}
+        }
+    }
+    LaunchedEffect(cameraOn) {
+        if (cameraOn) camera.bind(context as ComponentActivity, settings.cameraFront) else camera.release()
+    }
+    LaunchedEffect(settings.cameraFront) { camera.useFront(settings.cameraFront) }
+    LaunchedEffect(camera.message) {
+        if (camera.message != null) {
+            delay(5000)
+            camera.message = null
+        }
+    }
+
     fun showControls() {
         controlsVisible = true
         touches++
@@ -296,6 +386,7 @@ fun PrompterScreen(
     // Leaving the app pauses; coming back picks up where it was.
     var resumeOnReturn by remember { mutableStateOf(false) }
     LaunchedEffect(foreground) {
+        if (!foreground && camera.isRecording) camera.stop()
         if (!foreground && controller.running) {
             resumeOnReturn = true
             pause()
@@ -367,11 +458,31 @@ fun PrompterScreen(
                 detectTapGestures { if (controlsVisible && controller.running) controlsVisible = false else showControls() }
             },
     ) {
-        val viewport = maxHeight
+        if (cameraOn) {
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).apply {
+                        controller = camera.controller
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // With the camera on, the script sits in a see-through band at the top, near the lens.
+        val viewport = if (cameraOn) maxHeight * settings.cameraBand else maxHeight
         val cue = viewport * settings.cuePosition
         val lineHeight = (settings.fontSize * settings.lineSpacing).sp
 
-        Box(Modifier.fillMaxSize().graphicsLayer { scaleX = if (settings.mirror) -1f else 1f }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(viewport)
+                .background(if (cameraOn) Color.Black.copy(alpha = settings.bandOpacity) else Color.Black)
+                .clipToBounds()
+                .graphicsLayer { scaleX = if (settings.mirror && !cameraOn) -1f else 1f },
+        ) {
             Column(Modifier.fillMaxSize().verticalScroll(scroll, enabled = phase != Phase.Listening && phase != Phase.Scrolling)) {
                 Spacer(Modifier.height(cue))
                 Text(
@@ -400,7 +511,7 @@ fun PrompterScreen(
 
             // Cue marker: a small arrow and a faint rule at the reading line.
             val markerY = with(density) { cue.toPx() + lineHeight.toPx() / 2 }
-            Canvas(Modifier.fillMaxSize()) {
+            Canvas(Modifier.matchParentSize()) {
                 drawLine(highlight.copy(alpha = 0.12f), Offset(0f, markerY), Offset(size.width, markerY), 2f)
                 val s = 9.dp.toPx()
                 val arrow = Path().apply {
@@ -425,8 +536,25 @@ fun PrompterScreen(
             }
         }
 
+        Column(
+            Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = 14.dp, start = 90.dp, end = 90.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (camera.isRecording) RecordingPill(camera.elapsedMs)
+        }
+        if (controller.micBlocked && phase == Phase.Listening) {
+            Banner(
+                "Your phone is giving the microphone only to the video, so voice following can't hear you. " +
+                    "Tap Voice to switch to Auto for recordings.",
+                Modifier.align(Alignment.Center),
+            )
+        }
+        camera.message?.let { Banner(it, Modifier.align(Alignment.Center)) }
+
         CenterMessage(
             controller, countdown, highlight,
+            recording = camera.isRecording,
             onRestart = {
                 controller.restart()
                 scope.launch { scroll.animateScrollTo(0) }
@@ -444,12 +572,29 @@ fun PrompterScreen(
                 ) {
                     if (phase == Phase.Idle) {
                         Text(
-                            if (autoMode) "Auto-scroll is on. Tap play to start." else "Tap play, then start reading. Tap any word to start there.",
+                            when {
+                                cameraOn -> "Tap the red button to record and start the prompter together."
+                                autoMode -> "Auto-scroll is on. Tap play to start."
+                                else -> "Tap play, then start reading. Tap any word to start there."
+                            },
                             color = Color(0xFFB9BEC6),
                             fontSize = 14.sp,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Panel).padding(horizontal = 12.dp, vertical = 6.dp),
                         )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (!camera.isRecording) {
+                            PillButton(if (cameraOn) "Camera off" else "Camera") { toggleCamera() }
+                        }
+                        if (cameraOn) {
+                            if (!camera.isRecording) {
+                                PillButton(if (settings.cameraFront) "Use back camera" else "Use front camera") {
+                                    onSettingsChange(settings.copy(cameraFront = !settings.cameraFront))
+                                }
+                            }
+                            RecordButton(recording = camera.isRecording, onClick = ::record)
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         PillButton("Restart") {
@@ -479,6 +624,7 @@ private fun CenterMessage(
     controller: PrompterController,
     countdown: Int,
     highlight: Color,
+    recording: Boolean,
     onRestart: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -491,6 +637,8 @@ private fun CenterMessage(
             controller.phase == Phase.Preparing -> Message(
                 "Preparing the ${controller.script.lang.label} speech model. The first time takes up to a minute.",
             )
+
+            controller.phase == Phase.Done && recording -> Message("Done. Tap the red button to stop recording.")
 
             controller.phase == Phase.Done -> Column(
                 Modifier.clip(RoundedCornerShape(16.dp)).background(Panel).padding(24.dp),
@@ -558,6 +706,45 @@ private fun PlayButton(playing: Boolean, color: Color, onClick: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun RecordingPill(elapsedMs: Long) {
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(Panel).padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(10.dp).clip(CircleShape).background(RecordRed))
+        Text("REC ${ReadTime.format((elapsedMs / 1000).toInt())}", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** Red dot to start recording; red square to stop. */
+@Composable
+private fun RecordButton(recording: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(56.dp).clip(CircleShape).background(Color.White).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(if (recording) 22.dp else 44.dp)
+                .clip(if (recording) RoundedCornerShape(4.dp) else CircleShape)
+                .background(RecordRed),
+        )
+    }
+}
+
+@Composable
+private fun Banner(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        color = Color.White,
+        fontSize = 15.sp,
+        textAlign = TextAlign.Center,
+        modifier = modifier.padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Panel).padding(16.dp),
+    )
 }
 
 /** Live words per minute; turns into a "Slow down" warning when you're over the target. */

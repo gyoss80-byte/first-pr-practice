@@ -113,6 +113,13 @@ data class PrompterSettings(
     /** Measured personal pace per language, in words per minute; 0 until measured. */
     val paceEn: Int = 0,
     val paceEs: Int = 0,
+    /** Show the camera behind the script, with the script in a band at the top. */
+    val cameraOn: Boolean = false,
+    val cameraFront: Boolean = true,
+    /** Height of the script band over the camera, as a share of the screen. */
+    val cameraBand: Float = 0.4f,
+    /** How dark the band behind the script is, 0 (clear) to 1 (black). */
+    val bandOpacity: Float = 0.6f,
 ) {
     fun measuredPace(lang: Lang): Int? = (if (lang == Lang.ES) paceEs else paceEn).takeIf { it > 0 }
 
@@ -155,6 +162,10 @@ class SettingsStore(context: Context) {
             targetPace = prefs.getFloat("targetPace", d.targetPace),
             paceEn = prefs.getInt("paceEn", d.paceEn),
             paceEs = prefs.getInt("paceEs", d.paceEs),
+            cameraOn = prefs.getBoolean("cameraOn", d.cameraOn),
+            cameraFront = prefs.getBoolean("cameraFront", d.cameraFront),
+            cameraBand = prefs.getFloat("cameraBand", d.cameraBand),
+            bandOpacity = prefs.getFloat("bandOpacity", d.bandOpacity),
         )
     }
 
@@ -175,6 +186,10 @@ class SettingsStore(context: Context) {
             .putFloat("targetPace", s.targetPace)
             .putInt("paceEn", s.paceEn)
             .putInt("paceEs", s.paceEs)
+            .putBoolean("cameraOn", s.cameraOn)
+            .putBoolean("cameraFront", s.cameraFront)
+            .putFloat("cameraBand", s.cameraBand)
+            .putFloat("bandOpacity", s.bandOpacity)
             .apply()
     }
 }

@@ -3,6 +3,14 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Only Android 9 and older need this to save videos to the gallery. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
     <!-- Everything runs on the phone. Make sure no library sneaks network access in. -->
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
 
