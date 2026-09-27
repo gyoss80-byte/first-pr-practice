@@ -6,15 +6,18 @@ import android.content.Context
 import android.os.Build
 import android.provider.MediaStore
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.ExperimentalPersistentRecording
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
-import androidx.camera.view.CameraController
-import androidx.camera.view.LifecycleCameraController
-import androidx.camera.view.video.AudioConfig
+import androidx.camera.view.PreviewView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -27,17 +30,22 @@ import java.util.Locale
 
 /**
  * Camera preview and video recording for the prompter, through CameraX. Videos go to the
- * gallery under Movies/Prompter. Recording follows the phone's orientation when it starts.
+ * gallery under Movies/Prompter.
+ *
+ * Recordings are "persistent", so switching between the front and back camera while
+ * recording keeps going in the same video file.
  */
 class PrompterCamera(private val context: Context) {
-    val controller = LifecycleCameraController(context).apply {
-        setEnabledUseCases(CameraController.VIDEO_CAPTURE)
-        videoCaptureQualitySelector = QualitySelector.from(
-            Quality.FHD,
-            FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD),
-        )
-    }
+    private val recorder = Recorder.Builder()
+        .setQualitySelector(QualitySelector.from(Quality.FHD, FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)))
+        .build()
+    private val videoCapture = VideoCapture.withOutput(recorder)
+    private val preview = Preview.Builder().build()
+    private val mainExecutor = ContextCompat.getMainExecutor(context)
 
+    private var provider: ProcessCameraProvider? = null
+    private var owner: LifecycleOwner? = null
+    private var front = true
     private var recording: Recording? = null
 
     var isRecording by mutableStateOf(false)
@@ -48,20 +56,56 @@ class PrompterCamera(private val context: Context) {
     /** Last result to show the user, like "Saved to your gallery". */
     var message by mutableStateOf<String?>(null)
 
+    fun attach(view: PreviewView) {
+        preview.setSurfaceProvider(view.surfaceProvider)
+    }
+
     fun bind(owner: LifecycleOwner, front: Boolean) {
-        useFront(front)
-        controller.bindToLifecycle(owner)
+        this.owner = owner
+        this.front = front
+        val existing = provider
+        if (existing != null) {
+            rebind()
+            return
+        }
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
+            provider = runCatching { future.get() }.getOrNull()
+            if (provider == null) message = "Couldn't open the camera." else if (this.owner != null) rebind()
+        }, mainExecutor)
     }
 
+    /** Switches cameras; works while recording too. */
     fun useFront(front: Boolean) {
-        if (isRecording) return
-        controller.cameraSelector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        if (this.front == front) return
+        this.front = front
+        rebind()
     }
 
+    private fun rebind() {
+        val p = provider ?: return
+        val o = owner ?: return
+        val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        val available = runCatching { p.hasCamera(selector) }.getOrDefault(false)
+        if (!available) {
+            message = "This phone has no ${if (front) "front" else "back"} camera."
+            return
+        }
+        try {
+            p.unbindAll()
+            p.bindToLifecycle(o, selector, preview, videoCapture)
+        } catch (e: Exception) {
+            message = "Couldn't switch cameras: ${e.message ?: "the camera is busy"}."
+        }
+    }
+
+    /** [rotation] is the screen rotation (Surface.ROTATION_*), so the video is saved upright. */
     @SuppressLint("MissingPermission") // the screen checks CAMERA and RECORD_AUDIO first
-    fun start() {
+    @androidx.annotation.OptIn(ExperimentalPersistentRecording::class)
+    fun start(rotation: Int) {
         if (recording != null) return
         message = null
+        videoCapture.targetRotation = rotation
         val name = "Prompter_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -75,24 +119,27 @@ class PrompterCamera(private val context: Context) {
             .build()
         elapsedMs = 0
         recording = try {
-            controller.startRecording(output, AudioConfig.create(true), ContextCompat.getMainExecutor(context)) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> isRecording = true
-                    is VideoRecordEvent.Status -> elapsedMs = event.recordingStats.recordedDurationNanos / 1_000_000
-                    is VideoRecordEvent.Finalize -> {
-                        isRecording = false
-                        recording = null
-                        // SOURCE_INACTIVE means the camera closed (e.g. the app went to the background);
-                        // the video up to that point is still saved.
-                        val ok = !event.hasError() || event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE
-                        message = if (ok) {
-                            "Saved to your gallery (Movies › Prompter)."
-                        } else {
-                            "The recording couldn't be saved (error ${event.error})."
+            recorder.prepareRecording(context, output)
+                .withAudioEnabled()
+                .asPersistentRecording()
+                .start(mainExecutor) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start -> isRecording = true
+                        is VideoRecordEvent.Status -> elapsedMs = event.recordingStats.recordedDurationNanos / 1_000_000
+                        is VideoRecordEvent.Finalize -> {
+                            isRecording = false
+                            recording = null
+                            // SOURCE_INACTIVE means the camera closed (e.g. the app went to the
+                            // background); the video up to that point is still saved.
+                            val ok = !event.hasError() || event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE
+                            message = if (ok) {
+                                "Saved to your gallery (Movies › Prompter)."
+                            } else {
+                                "The recording couldn't be saved (error ${event.error})."
+                            }
                         }
                     }
                 }
-            }
         } catch (e: Exception) {
             message = "Couldn't start recording: ${e.message ?: "the camera isn't ready"}."
             null
@@ -106,6 +153,7 @@ class PrompterCamera(private val context: Context) {
     fun release() {
         recording?.stop()
         recording = null
-        controller.unbind()
+        provider?.unbindAll()
+        owner = null
     }
 }

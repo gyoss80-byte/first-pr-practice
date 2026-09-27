@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.camera.view.PreviewView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -245,6 +246,8 @@ fun PrompterScreen(
 
     val camera = remember { PrompterCamera(context.applicationContext) }
     DisposableEffect(camera) { onDispose { camera.release() } }
+    val view = LocalView.current
+    fun screenRotation() = view.display?.rotation ?: Surface.ROTATION_0
     fun granted(permission: String) = context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
     var hasCamera by remember { mutableStateOf(granted(Manifest.permission.CAMERA)) }
     val cameraOn = settings.cameraOn && hasCamera
@@ -336,7 +339,7 @@ fun PrompterScreen(
             return
         }
         if (controller.phase == Phase.Listening || controller.phase == Phase.Scrolling) {
-            camera.start()
+            camera.start(screenRotation())
         } else {
             pendingRecord = true
             play()
@@ -347,7 +350,7 @@ fun PrompterScreen(
         when (phase) {
             Phase.Listening, Phase.Scrolling -> {
                 pendingRecord = false
-                camera.start()
+                camera.start(screenRotation())
             }
             Phase.Paused -> pendingRecord = false
             else -> {}
@@ -482,8 +485,8 @@ fun PrompterScreen(
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).apply {
-                        this.controller = camera.controller
                         scaleType = PreviewView.ScaleType.FILL_CENTER
+                        camera.attach(this)
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -608,10 +611,8 @@ fun PrompterScreen(
                             PillButton(if (cameraOn) "Camera off" else "Camera") { toggleCamera() }
                         }
                         if (cameraOn) {
-                            if (!camera.isRecording) {
-                                PillButton(if (settings.cameraFront) "Use back camera" else "Use front camera") {
-                                    onSettingsChange(settings.copy(cameraFront = !settings.cameraFront))
-                                }
+                            PillButton(if (settings.cameraFront) "Use back camera" else "Use front camera") {
+                                onSettingsChange(settings.copy(cameraFront = !settings.cameraFront))
                             }
                             RecordButton(recording = camera.isRecording, onClick = ::record)
                         }
