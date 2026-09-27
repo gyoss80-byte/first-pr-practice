@@ -462,7 +462,7 @@ fun PrompterScreen(
             AndroidView(
                 factory = { ctx ->
                     PreviewView(ctx).apply {
-                        controller = camera.controller
+                        this.controller = camera.controller
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                     }
                 },
