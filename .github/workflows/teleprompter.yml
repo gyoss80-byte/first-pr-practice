@@ -1,0 +1,63 @@
+name: Build Prompter APK
+
+on:
+  push:
+    paths:
+      - "teleprompter/**"
+      - ".github/workflows/teleprompter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prompter-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: teleprompter
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache speech models
+        uses: actions/cache@v4
+        with:
+          path: teleprompter/app/src/main/assets
+          key: vosk-models-${{ hashFiles('teleprompter/scripts/fetch-models.sh') }}
+
+      - name: Download speech models
+        run: ./scripts/fetch-models.sh
+
+      - name: Build APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Name the APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Prompter.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Prompter-apk
+          path: teleprompter/Prompter.apk
+
+      # A release page gives a plain .apk link that opens straight from the phone's browser.
+      - name: Publish to the "prompter-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete prompter-latest --yes --cleanup-tag || true
+          gh release create prompter-latest Prompter.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Prompter (latest test build)" \
+            --notes "Built from ${GITHUB_REF_NAME} at ${GITHUB_SHA::7}. Open this page on your Android phone and tap Prompter.apk to install."
