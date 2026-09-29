@@ -3,6 +3,7 @@ package com.voiceprompter
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,6 +28,12 @@ private sealed interface Screen {
 }
 
 class MainActivity : ComponentActivity() {
+    /** Set by the prompter screen to handle Bluetooth remote and keyboard keys. */
+    var keyHandler: ((KeyEvent) -> Boolean)? = null
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        keyHandler?.invoke(event) == true || super.dispatchKeyEvent(event)
+
     private lateinit var engine: SpeechEngine
     private lateinit var scripts: ScriptStore
     private lateinit var settingsStore: SettingsStore
@@ -82,6 +89,10 @@ class MainActivity : ComponentActivity() {
                         settings = settings,
                         onChange = scripts::update,
                         onStart = { screen = Screen.Prompter(s.id) },
+                        onRecord = {
+                            updateSettings(settings.copy(cameraOn = true))
+                            screen = Screen.Prompter(s.id)
+                        },
                         onBack = ::back,
                     )
                 }

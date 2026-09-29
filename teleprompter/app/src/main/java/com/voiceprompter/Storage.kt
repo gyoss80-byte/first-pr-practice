@@ -58,26 +58,53 @@ class ScriptStore(context: Context) {
         save()
     }
 
-    private fun load() {
-        runCatching {
-            val array = JSONArray(file.readText())
-            for (i in 0 until array.length()) {
-                val o = array.getJSONObject(i)
-                scripts += Script(
-                    id = o.getString("id"),
-                    title = o.optString("title"),
-                    lang = if (o.optString("lang") == Lang.ES.code) Lang.ES else Lang.EN,
-                    text = o.optString("text"),
-                    updatedAt = o.optLong("updatedAt"),
-                )
+    /** All scripts as one JSON backup file. */
+    fun exportJson(): String = toJson(scripts).toString(2)
+
+    /**
+     * Adds the scripts from a backup made with [exportJson]. A script that's already here
+     * (same id and text) is skipped; one with the same id but different text is added as a
+     * copy, so nothing on the phone is overwritten. Returns how many scripts were added.
+     */
+    fun importJson(json: String): Int {
+        val incoming = parse(json)
+        var added = 0
+        for (script in incoming) {
+            val existing = get(script.id)
+            when {
+                existing == null -> scripts += script
+                existing.text == script.text -> continue
+                else -> scripts += script.copy(id = UUID.randomUUID().toString(), title = "${script.displayTitle} (restored)")
             }
-            scripts.sortByDescending { it.updatedAt }
+            added++
+        }
+        scripts.sortByDescending { it.updatedAt }
+        if (added > 0) save()
+        return added
+    }
+
+    private fun load() {
+        runCatching { scripts += parse(file.readText()) }
+        scripts.sortByDescending { it.updatedAt }
+    }
+
+    private fun parse(json: String): List<Script> {
+        val array = JSONArray(json)
+        return (0 until array.length()).map { i ->
+            val o = array.getJSONObject(i)
+            Script(
+                id = o.getString("id"),
+                title = o.optString("title"),
+                lang = if (o.optString("lang") == Lang.ES.code) Lang.ES else Lang.EN,
+                text = o.optString("text"),
+                updatedAt = o.optLong("updatedAt"),
+            )
         }
     }
 
-    private fun save() {
+    private fun toJson(list: List<Script>): JSONArray {
         val array = JSONArray()
-        scripts.forEach {
+        list.forEach {
             array.put(
                 JSONObject()
                     .put("id", it.id)
@@ -87,11 +114,22 @@ class ScriptStore(context: Context) {
                     .put("updatedAt", it.updatedAt),
             )
         }
+        return array
+    }
+
+    private fun save() {
         // Write to a temp file first so a crash mid-write can't wipe the scripts.
         val tmp = File(file.parentFile, "scripts.json.tmp")
-        tmp.writeText(array.toString())
+        tmp.writeText(toJson(scripts).toString())
         tmp.renameTo(file)
     }
+}
+
+/** How the prompter moves: following your voice, at a fixed speed, or only by hand. */
+enum class ScrollMode(val label: String) {
+    VOICE("Voice"),
+    AUTO("Auto"),
+    MANUAL("Manual"),
 }
 
 data class PrompterSettings(
@@ -102,9 +140,10 @@ data class PrompterSettings(
     val highlightColor: Int = HIGHLIGHT_COLORS[0],
     val cuePosition: Float = 0.3f,
     val mirror: Boolean = false,
-    val countdown: Boolean = true,
+    /** Seconds of countdown before starting; 0 turns it off. */
+    val countdownSeconds: Int = 3,
     val sensitivity: Sensitivity = Sensitivity.NORMAL,
-    val autoScroll: Boolean = false,
+    val scrollMode: ScrollMode = ScrollMode.VOICE,
     /** Auto-scroll speed in dp per second. */
     val autoSpeed: Float = 40f,
     val showPace: Boolean = true,
@@ -120,6 +159,10 @@ data class PrompterSettings(
     val cameraBand: Float = 0.4f,
     /** How dark the band behind the script is, 0 (clear) to 1 (black). */
     val bandOpacity: Float = 0.6f,
+    /** Record in 4K when the camera supports it, instead of 1080p. */
+    val video4k: Boolean = false,
+    /** Tell the speech recognizer to expect the script's own words. */
+    val scriptWords: Boolean = false,
 ) {
     fun measuredPace(lang: Lang): Int? = (if (lang == Lang.ES) paceEs else paceEn).takeIf { it > 0 }
 
@@ -153,10 +196,12 @@ class SettingsStore(context: Context) {
             highlightColor = prefs.getInt("highlightColor", d.highlightColor),
             cuePosition = prefs.getFloat("cuePosition", d.cuePosition),
             mirror = prefs.getBoolean("mirror", d.mirror),
-            countdown = prefs.getBoolean("countdown", d.countdown),
+            // Older versions stored an on/off countdown and an auto-scroll switch.
+            countdownSeconds = prefs.getInt("countdownSeconds", if (prefs.getBoolean("countdown", true)) 3 else 0),
             sensitivity = runCatching { Sensitivity.valueOf(prefs.getString("sensitivity", null)!!) }
                 .getOrDefault(d.sensitivity),
-            autoScroll = prefs.getBoolean("autoScroll", d.autoScroll),
+            scrollMode = runCatching { ScrollMode.valueOf(prefs.getString("scrollMode", null)!!) }
+                .getOrDefault(if (prefs.getBoolean("autoScroll", false)) ScrollMode.AUTO else d.scrollMode),
             autoSpeed = prefs.getFloat("autoSpeed", d.autoSpeed),
             showPace = prefs.getBoolean("showPace", d.showPace),
             targetPace = prefs.getFloat("targetPace", d.targetPace),
@@ -166,6 +211,8 @@ class SettingsStore(context: Context) {
             cameraFront = prefs.getBoolean("cameraFront", d.cameraFront),
             cameraBand = prefs.getFloat("cameraBand", d.cameraBand),
             bandOpacity = prefs.getFloat("bandOpacity", d.bandOpacity),
+            video4k = prefs.getBoolean("video4k", d.video4k),
+            scriptWords = prefs.getBoolean("scriptWords", d.scriptWords),
         )
     }
 
@@ -178,9 +225,9 @@ class SettingsStore(context: Context) {
             .putInt("highlightColor", s.highlightColor)
             .putFloat("cuePosition", s.cuePosition)
             .putBoolean("mirror", s.mirror)
-            .putBoolean("countdown", s.countdown)
+            .putInt("countdownSeconds", s.countdownSeconds)
             .putString("sensitivity", s.sensitivity.name)
-            .putBoolean("autoScroll", s.autoScroll)
+            .putString("scrollMode", s.scrollMode.name)
             .putFloat("autoSpeed", s.autoSpeed)
             .putBoolean("showPace", s.showPace)
             .putFloat("targetPace", s.targetPace)
@@ -190,6 +237,8 @@ class SettingsStore(context: Context) {
             .putBoolean("cameraFront", s.cameraFront)
             .putFloat("cameraBand", s.cameraBand)
             .putFloat("bandOpacity", s.bandOpacity)
+            .putBoolean("video4k", s.video4k)
+            .putBoolean("scriptWords", s.scriptWords)
             .apply()
     }
 }

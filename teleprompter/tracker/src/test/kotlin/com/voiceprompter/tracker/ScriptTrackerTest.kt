@@ -176,7 +176,7 @@ class ScriptTrackerTest {
     fun `numbers and symbols are skipped over`() {
         val t = tracker(english)
         val price = t.tokens.indexOfFirst { it.text == "\$14.99" }
-        assertEquals(TokenKind.SKIP, t.tokens[price].kind)
+        assertEquals(TokenKind.NUMBER, t.tokens[price].kind)
         val r = Recorder(t)
         englishSpoken.take(4).forEach(r::say)
         assertEquals(endOfSentence(english, 3), t.wordCursor)
@@ -241,5 +241,93 @@ class ScriptTrackerTest {
         val t = ScriptTracker(script)
         t.tokens.forEach { assertEquals(it.text, script.substring(it.start, it.end)) }
         assertEquals(listOf("Hi", "there", "friend.", "\$5", "[smile]"), t.tokens.map { it.text })
+    }
+
+    @Test
+    fun `numbers are followed however they are said`() {
+        val script = "It costs \$14.99 per month, or 50% off in 2026 for new members."
+        for (spoken in listOf(
+            "it costs fourteen ninety nine per month or fifty percent off in twenty twenty six for new members",
+            "it costs fourteen dollars and ninety nine cents per month or fifty percent off in two thousand twenty six for new members",
+        )) {
+            val r = Recorder(ScriptTracker(script))
+            r.say(spoken)
+            assertTrue(r.t.isDone, "stuck at ${r.t.wordCursor} for: $spoken")
+        }
+    }
+
+    @Test
+    fun `spanish numbers are followed`() {
+        val script = "Cuesta \$14.99 al mes, con 50% de descuento para nuevos miembros."
+        val r = Recorder(ScriptTracker(script))
+        r.say("cuesta catorce con noventa y nueve al mes con cincuenta por ciento de descuento para nuevos miembros")
+        assertTrue(r.t.isDone, "stuck at ${r.t.wordCursor}")
+    }
+
+    @Test
+    fun `number words written in the script still match`() {
+        val r = Recorder(ScriptTracker("This is one of the best ways to learn, trust me on this."))
+        r.say("this is one of the best ways to learn trust me on this")
+        assertTrue(r.t.isDone)
+    }
+
+    @Test
+    fun `a multi-token number is highlighted as one word`() {
+        val t = ScriptTracker("Buy two hundred shares of the fund today.")
+        t.jumpTo(t.tokens.indexOfFirst { it.text == "hundred" }) // a tap inside the number
+        assertEquals("two", t.tokens[t.nextToken].text)
+        assertEquals("hundred", t.tokens[t.nextTokenEnd].text)
+        Recorder(t).say("two hundred shares of the")
+        assertEquals("fund", t.tokens[t.nextToken].text)
+    }
+
+    @Test
+    fun `section headings are listed and never matched`() {
+        val script = "# Intro\nWelcome to the lesson.\n\n## Part two: calls\nA call option gives you the right to buy."
+        val t = ScriptTracker(script)
+        assertEquals(listOf("Intro", "Part two: calls"), t.sections.map { it.title })
+        t.sections.forEach { assertEquals(TokenKind.HEADING, t.tokens[it.token].kind) }
+        val r = Recorder(t)
+        r.say("welcome to the lesson")
+        r.say("a call option gives you the right to buy")
+        assertTrue(t.isDone)
+        t.jumpTo(t.sections[1].token)
+        assertEquals("A", t.tokens[t.nextToken].text)
+    }
+
+    @Test
+    fun `summary lists skipped passages and off-script moments`() {
+        val t = tracker(english)
+        val r = Recorder(t)
+        r.say(englishSpoken[0])
+        r.say("okay so let me grab some coffee real quick")
+        r.say(englishSpoken[2]) // skips sentence 1
+        englishSpoken.drop(3).forEach(r::say)
+        assertTrue(t.isDone)
+        assertEquals(1, t.offScriptMoments)
+        val skipped = t.skippedPassages()
+        assertEquals(1, skipped.size)
+        val text = skipped[0].let { rng -> t.tokens.slice(rng).joinToString(" ") { it.text } }
+        assertTrue(text.startsWith("Today we are going"), text)
+        t.clearSummary()
+        assertEquals(0, t.offScriptMoments)
+        assertTrue(t.skippedPassages().isEmpty())
+    }
+
+    @Test
+    fun `re-reading a skipped passage clears it from the summary`() {
+        val t = tracker(english)
+        val r = Recorder(t)
+        r.say(englishSpoken[0])
+        r.say(englishSpoken[2])
+        t.jumpTo(t.tokens.indexOfFirst { it.text == "Today" })
+        r.say(englishSpoken[1])
+        assertTrue(t.skippedPassages().isEmpty(), "${t.skippedPassages()}")
+    }
+
+    @Test
+    fun `vocabulary keeps accents for the recognizer`() {
+        val v = ScriptTracker.vocabulary("La mejor opción, ¿verdad? Don't [pause] pay \$5.")
+        assertEquals(setOf("la", "mejor", "opción", "verdad", "don't", "pay"), v)
     }
 }

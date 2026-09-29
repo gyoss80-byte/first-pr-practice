@@ -7,6 +7,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -72,10 +73,21 @@ class SpeechEngine(private val context: Context) {
 
     /** Starts listening with an already loaded model. Returns false if it couldn't start. */
     @SuppressLint("MissingPermission") // callers request RECORD_AUDIO first
-    fun start(lang: Lang, listener: SpeechListener): Boolean {
+    /**
+     * [vocabulary], when given, tells the recognizer which words to expect. Anything else is
+     * heard as unknown and dropped, which helps with jargon and mixed-language scripts.
+     */
+    fun start(lang: Lang, listener: SpeechListener, vocabulary: Collection<String>? = null): Boolean {
         val model = models[lang] ?: return false
         stop()
-        val rec = Recognizer(model, SAMPLE_RATE.toFloat())
+        val rec = if (vocabulary.isNullOrEmpty()) {
+            Recognizer(model, SAMPLE_RATE.toFloat())
+        } else {
+            // Words the model doesn't know are ignored by Vosk; [unk] catches everything else.
+            val grammar = JSONArray((vocabulary + "[unk]").toList()).toString()
+            runCatching { Recognizer(model, SAMPLE_RATE.toFloat(), grammar) }
+                .getOrElse { Recognizer(model, SAMPLE_RATE.toFloat()) }
+        }
         val minBuffer = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
         )
@@ -156,6 +168,7 @@ class SpeechEngine(private val context: Context) {
 
     private fun field(json: String, key: String): String =
         runCatching { JSONObject(json).optString(key) }.getOrDefault("")
+            .replace("[unk]", " ").trim().replace(Regex("\\s+"), " ")
 
     /** RMS loudness mapped from roughly -50 dB..0 dB onto 0..1. */
     private fun level(buffer: ShortArray, n: Int): Float {

@@ -10,6 +10,13 @@ Speech recognition runs on the phone with [Vosk](https://alphacephei.com/vosk/an
 - **Prompter:** full screen, black background, and the screen stays on. The next word to read is highlighted on the cue line, and words already read are dimmed. Tap any word to jump there, or drag the text up or down at any time; when you let go, it follows from the line on the cue arrow. The controls hide after 3 seconds; touching the screen anywhere brings them back.
 - **Pace:** while you read, a pill shows your words per minute and turns into "Slow down" when you go more than 10% over your target. Each script shows an estimated read time, which switches to your own measured pace (tracked separately for English and Spanish) once you've read a few scripts.
 - **Camera:** tap Camera on the prompter to see yourself (front or back camera) with the script in a see-through band at the top. The red button counts down, then records video and starts the prompter together; you can switch between the front and back camera while recording, and it all stays in one video. Videos save to the gallery under Movies › Prompter. If a phone won't share the microphone between the video and voice following, the prompter says so; use Auto mode for those recordings.
+- **Scrolling modes:** Voice (follows you), Auto (fixed speed) or Manual (only moves when you drag the text or use a remote); switch on the prompter screen or in Settings.
+- **Sections:** start a line with `#` (like `# Intro`) to make a section, then jump to it from the Sections menu on the prompter.
+- **Numbers:** `$14.99`, `50%` or `2026` are followed however you say them, in English or Spanish.
+- **Summary:** when you finish, the prompter shows your time, pace, skipped passages and how often you went off-script.
+- **Remotes:** Bluetooth remotes and keyboards that send play/pause, arrow or page keys start/pause and move a line at a time. (Selfie remotes that send "volume up" aren't supported.)
+- **Recording extras:** countdown of 3, 5 or 10 seconds, optional 4K, videos named after the script, and a Share button after saving.
+- **Backup:** Back up / Restore on the script list saves all scripts to one file (Drive, Downloads, anywhere the phone can save).
 - **Settings:** font size, line spacing, side margins, colors, cue line position, mirror mode, countdown, matching sensitivity, and an auto-scroll mode that doesn't use the microphone.
 
 The voice-following logic lives in `tracker/` (`ScriptTracker`), a plain Kotlin module with unit tests:

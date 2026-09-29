@@ -3,6 +3,7 @@ package com.voiceprompter
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.camera.core.CameraSelector
@@ -36,10 +37,9 @@ import java.util.Locale
  * recording keeps going in the same video file.
  */
 class PrompterCamera(private val context: Context) {
-    private val recorder = Recorder.Builder()
-        .setQualitySelector(QualitySelector.from(Quality.FHD, FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)))
-        .build()
-    private val videoCapture = VideoCapture.withOutput(recorder)
+    private var uhd = false
+    private var recorder = buildRecorder(uhd)
+    private var videoCapture = VideoCapture.withOutput(recorder)
     private val preview = Preview.Builder().build()
     private val mainExecutor = ContextCompat.getMainExecutor(context)
 
@@ -55,6 +55,25 @@ class PrompterCamera(private val context: Context) {
 
     /** Last result to show the user, like "Saved to your gallery". */
     var message by mutableStateOf<String?>(null)
+
+    /** The last video saved, for sharing; cleared along with [message]. */
+    var lastVideo by mutableStateOf<Uri?>(null)
+
+    /** 4K when the camera supports it (falls back to the best lower quality), else 1080p. */
+    fun setUhd(uhd: Boolean) {
+        if (this.uhd == uhd || recording != null) return
+        this.uhd = uhd
+        recorder = buildRecorder(uhd)
+        videoCapture = VideoCapture.withOutput(recorder)
+        rebind()
+    }
+
+    private fun buildRecorder(uhd: Boolean): Recorder {
+        val quality = if (uhd) Quality.UHD else Quality.FHD
+        return Recorder.Builder()
+            .setQualitySelector(QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(quality)))
+            .build()
+    }
 
     fun attach(view: PreviewView) {
         preview.setSurfaceProvider(view.surfaceProvider)
@@ -102,11 +121,14 @@ class PrompterCamera(private val context: Context) {
     /** [rotation] is the screen rotation (Surface.ROTATION_*), so the video is saved upright. */
     @SuppressLint("MissingPermission") // the screen checks CAMERA and RECORD_AUDIO first
     @androidx.annotation.OptIn(ExperimentalPersistentRecording::class)
-    fun start(rotation: Int) {
+    fun start(rotation: Int, title: String) {
         if (recording != null) return
         message = null
+        lastVideo = null
         videoCapture.targetRotation = rotation
-        val name = "Prompter_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        // "Options basics – 2026-09-29 14.05", safe for any file system.
+        val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), " ").trim().take(60).ifEmpty { "Prompter" }
+        val name = "$safeTitle – " + SimpleDateFormat("yyyy-MM-dd HH.mm.ss", Locale.US).format(Date())
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -132,6 +154,7 @@ class PrompterCamera(private val context: Context) {
                             // SOURCE_INACTIVE means the camera closed (e.g. the app went to the
                             // background); the video up to that point is still saved.
                             val ok = !event.hasError() || event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE
+                            if (ok) lastVideo = event.outputResults.outputUri.takeIf { it != Uri.EMPTY }
                             message = if (ok) {
                                 "Saved to your gallery (Movies › Prompter)."
                             } else {

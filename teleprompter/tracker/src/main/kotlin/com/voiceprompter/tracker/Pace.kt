@@ -77,13 +77,15 @@ object ReadTime {
     /** Seconds a bracketed note like `[pause]` adds. */
     const val NOTE_SECONDS = 2
 
+    private fun isSpoken(kind: TokenKind) = kind != TokenKind.NOTE && kind != TokenKind.HEADING
+
     fun spokenWords(script: String): Int =
-        ScriptTracker.tokenize(script).count { it.kind != TokenKind.NOTE }
+        ScriptTracker.tokenize(script).count { isSpoken(it.kind) }
 
     fun estimateSeconds(script: String, wpm: Int): Int {
         val tokens = ScriptTracker.tokenize(script)
-        val words = tokens.count { it.kind != TokenKind.NOTE }
-        val notes = tokens.size - words
+        val words = tokens.count { isSpoken(it.kind) }
+        val notes = tokens.count { it.kind == TokenKind.NOTE }
         if (words == 0) return 0
         return ((words * 60.0 / wpm.coerceAtLeast(1)) + notes * NOTE_SECONDS).let { Math.round(it).toInt() }
     }

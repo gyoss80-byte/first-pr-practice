@@ -110,6 +110,25 @@ fun ScriptListScreen(
         result.onSuccess { (name, text) -> onOpen(store.create(name, guessLang(text), text)) }
         result.onFailure { importError = "Couldn't read that file. Pick a plain .txt file." }
     }
+    var backupNote by remember { mutableStateOf<String?>(null) }
+    val backup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        backupNote = runCatching {
+            context.contentResolver.openOutputStream(uri)!!.bufferedWriter().use { it.write(store.exportJson()) }
+            "Backed up ${store.scripts.size} scripts."
+        }.getOrElse { "Couldn't save the backup there. Try another folder." }
+    }
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        backupNote = runCatching {
+            val json = context.contentResolver.openInputStream(uri)!!.bufferedReader().use { it.readText() }
+            when (val added = store.importJson(json)) {
+                0 -> "Nothing new in that backup; your scripts are already here."
+                1 -> "Restored 1 script."
+                else -> "Restored $added scripts."
+            }
+        }.getOrElse { "That file isn't a Prompter backup." }
+    }
 
     Page {
         Header("Scripts", right = { TextButton(onClick = onSettings) { Text("Settings") } })
@@ -121,6 +140,14 @@ fun ScriptListScreen(
             }
         }
         importError?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(backupNote ?: "Scripts live only in this app. Keep a backup on Drive or your phone.", color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+                backup.launch("Prompter backup $date.json")
+            }) { Text("Back up") }
+            TextButton(onClick = { restore.launch(arrayOf("application/json", "application/octet-stream", "text/plain")) }) { Text("Restore") }
+        }
 
         if (store.scripts.isEmpty()) {
             Text("No scripts yet. Tap New script or import a .txt file.", color = Dim, fontSize = 16.sp)
@@ -222,6 +249,7 @@ fun EditorScreen(
     settings: PrompterSettings,
     onChange: (Script) -> Unit,
     onStart: () -> Unit,
+    onRecord: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(
@@ -256,7 +284,12 @@ fun EditorScreen(
         OutlinedTextField(
             value = script.text,
             onValueChange = { onChange(script.copy(text = it)) },
-            placeholder = { Text("Type or paste your script. Put stage notes in brackets, like [pause].") },
+            placeholder = {
+                Text(
+                    "Type or paste your script. Put stage notes in brackets, like [pause]. " +
+                        "Start a line with # to make a section, like # Intro.",
+                )
+            },
             textStyle = TextStyle(fontSize = 18.sp, lineHeight = 26.sp, color = Color.White),
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
@@ -269,11 +302,22 @@ fun EditorScreen(
                 fontSize = 14.sp,
             )
         }
-        Button(
-            onClick = onStart,
-            enabled = script.text.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-        ) { Text("Start", fontSize = 18.sp) }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = onStart,
+                enabled = script.text.isNotBlank(),
+                modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+            ) { Text("Start", fontSize = 18.sp) }
+            OutlinedButton(
+                onClick = onRecord,
+                enabled = script.text.isNotBlank(),
+                modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+            ) {
+                Box(Modifier.size(12.dp).clip(CircleShape).background(Color(0xFFE5383B)))
+                Spacer(Modifier.size(10.dp))
+                Text("Record", fontSize = 18.sp, color = Color.White)
+            }
+        }
     }
 }
 
@@ -340,8 +384,15 @@ fun SettingsScreen(
         SwitchRow("Mirror mode", "Flip the text for a teleprompter glass.", settings.mirror) {
             onChange(settings.copy(mirror = it))
         }
-        SwitchRow("Countdown", "3, 2, 1 before listening starts.", settings.countdown) {
-            onChange(settings.copy(countdown = it))
+        Text("Countdown before starting", color = Color.White, fontSize = 16.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0 to "Off", 3 to "3 s", 5 to "5 s", 10 to "10 s").forEach { (seconds, label) ->
+                FilterChip(
+                    selected = settings.countdownSeconds == seconds,
+                    onClick = { onChange(settings.copy(countdownSeconds = seconds)) },
+                    label = { Text(label) },
+                )
+            }
         }
 
         HorizontalDivider(color = Rule)
@@ -362,6 +413,9 @@ fun SettingsScreen(
         SliderRow("Band darkness", "${(settings.bandOpacity * 100).roundToInt()}%", settings.bandOpacity, 0f..0.9f) {
             onChange(settings.copy(bandOpacity = it))
         }
+        SwitchRow("Record in 4K", "Uses 4K when your camera supports it; otherwise the best it can. Bigger files.", settings.video4k) {
+            onChange(settings.copy(video4k = it))
+        }
 
         HorizontalDivider(color = Rule)
         Label("Voice following")
@@ -379,6 +433,12 @@ fun SettingsScreen(
             "Relaxed follows loosely and moves on sooner. Strict waits for a closer match.",
             color = Dim, fontSize = 14.sp,
         )
+        SwitchRow(
+            "Listen for script words",
+            "Tells the recognizer which words your script uses. Can help with trading terms and " +
+                "English words in Spanish scripts. Try it; turn it off if tracking gets worse.",
+            settings.scriptWords,
+        ) { onChange(settings.copy(scriptWords = it)) }
         OutlinedButton(onClick = onMicTest, modifier = Modifier.fillMaxWidth()) {
             Text("Test recognition", color = Color.White)
         }
@@ -416,11 +476,18 @@ fun SettingsScreen(
         )
 
         HorizontalDivider(color = Rule)
-        Label("Auto-scroll")
-        SwitchRow("Use auto-scroll", "Scroll at a fixed speed without the microphone.", settings.autoScroll) {
-            onChange(settings.copy(autoScroll = it))
+        Label("Scrolling")
+        Text(
+            "Voice follows you as you read. Auto scrolls at a fixed speed. Manual only moves when " +
+                "you drag the text or use a remote. You can also switch on the prompter screen.",
+            color = Dim, fontSize = 14.sp,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ScrollMode.entries.forEach { m ->
+                FilterChip(selected = settings.scrollMode == m, onClick = { onChange(settings.copy(scrollMode = m)) }, label = { Text(m.label) })
+            }
         }
-        SliderRow("Speed", "${settings.autoSpeed.roundToInt()} dp/s", settings.autoSpeed, 10f..150f) {
+        SliderRow("Auto-scroll speed", "${settings.autoSpeed.roundToInt()} dp/s", settings.autoSpeed, 10f..150f) {
             onChange(settings.copy(autoSpeed = it))
         }
         Spacer(Modifier.heightIn(min = 24.dp))

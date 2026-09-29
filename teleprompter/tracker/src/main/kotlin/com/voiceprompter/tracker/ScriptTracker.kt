@@ -12,12 +12,24 @@ enum class TokenKind {
     /** A bracketed stage note like `[pause]`: shown, never matched. */
     NOTE,
 
-    /** Numbers and symbols like `$14.99` or `50%`: shown, skipped over while matching. */
+    /**
+     * A number like `$14.99`, `50%` or `2026`. A run of numbers and number words counts as one
+     * spoken "number", however the speaker says it.
+     */
+    NUMBER,
+
+    /** Symbols with nothing to say, like `&`: shown, skipped over while matching. */
     SKIP,
+
+    /** A section heading: a line starting with `#`. Shown, never matched. */
+    HEADING,
 }
 
 /** One piece of the script, with its character range in the original text for rendering. */
 data class Token(val text: String, val start: Int, val end: Int, val kind: TokenKind, val norm: String)
+
+/** A `# Heading` line in the script; [token] is the heading's token index. */
+data class Section(val title: String, val token: Int)
 
 /**
  * How closely speech must match the script.
@@ -41,9 +53,20 @@ enum class Sensitivity(val similarity: Double, val advanceRun: Int, val backRun:
 class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.NORMAL) {
     val tokens: List<Token> = tokenize(script)
 
-    /** Token index of every matchable word, in order. */
-    private val wordTokens: IntArray = tokens.indices.filter { tokens[it].kind == TokenKind.WORD }.toIntArray()
-    private val words: List<String> = wordTokens.map { tokens[it].norm }
+    val sections: List<Section> = tokens.indices
+        .filter { tokens[it].kind == TokenKind.HEADING }
+        .map { Section(tokens[it].text.trimStart('#', ' ', '\t').trim(), it) }
+
+    /** Matchable words in order, with the range of tokens each one covers (numbers can span several). */
+    private val units: List<Pair<String, IntRange>> = run {
+        val spoken = tokens.indices.filter { tokens[it].kind == TokenKind.WORD || tokens[it].kind == TokenKind.NUMBER }
+        collapseNumbers(spoken.map { tokens[it].norm }) { tokens[spoken[it]].kind == TokenKind.NUMBER }
+            .map { (word, range) -> word to (spoken[range.first]..spoken[range.last]) }
+    }
+    private val words: List<String> = units.map { it.first }
+
+    /** Last token of each word; passing it means everything up to there was read. */
+    private val wordTokens: IntArray = units.map { it.second.last }.toIntArray()
 
     /** Index into the script's words of the last word confirmed spoken; -1 before the first. */
     var wordCursor = -1
@@ -54,8 +77,11 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
     /** Token index of the last word confirmed spoken, or -1 before the first. */
     val cursorToken: Int get() = if (wordCursor < 0) -1 else wordTokens[wordCursor]
 
-    /** Token index of the next word to read, or -1 once the script is finished. */
-    val nextToken: Int get() = if (wordCursor + 1 < words.size) wordTokens[wordCursor + 1] else -1
+    /** First token of the next word to read, or -1 once the script is finished. */
+    val nextToken: Int get() = if (wordCursor + 1 < words.size) units[wordCursor + 1].second.first else -1
+
+    /** Last token of the next word to read (differs from [nextToken] for multi-token numbers). */
+    val nextTokenEnd: Int get() = if (wordCursor + 1 < words.size) units[wordCursor + 1].second.last else -1
 
     val isDone: Boolean get() = words.isNotEmpty() && wordCursor == words.lastIndex
 
@@ -68,17 +94,51 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
     /** Most words seen so far in the current utterance's recognized text. */
     private var utteranceWords = 0
 
+    /** Whether the cursor moved during the current utterance. */
+    private var utteranceMoved = false
+
+    /** Words passed over by a jump ahead and not read since. */
+    private val skipped = BooleanArray(words.size)
+
+    /** Utterances of several words that didn't match the script: ad-libs and asides. */
+    var offScriptMoments = 0
+        private set
+
     /** Handles in-progress recognized text. Returns true if the cursor moved. */
     fun onPartial(text: String): Boolean = update(text)
 
     /** Handles the finished text of an utterance. Returns true if the cursor moved. */
     fun onFinal(text: String): Boolean {
         val moved = update(text)
+        if (!utteranceMoved && normalizeWords(text).size >= OFF_SCRIPT_WORDS) offScriptMoments++
         normalizeWords(text).forEach { history.addLast(it) }
         while (history.size > TAIL) history.removeFirst()
         utteranceAnchor = null
         utteranceWords = 0
+        utteranceMoved = false
         return moved
+    }
+
+    /** Token ranges of passages that were skipped, for the end-of-read summary. */
+    fun skippedPassages(): List<IntRange> {
+        val out = mutableListOf<IntRange>()
+        var i = 0
+        while (i < words.size) {
+            if (!skipped[i]) {
+                i++
+                continue
+            }
+            val start = i
+            while (i < words.size && skipped[i]) i++
+            out += units[start].second.first..units[i - 1].second.last
+        }
+        return out
+    }
+
+    /** Clears the summary counters, e.g. when reading again from the top. */
+    fun clearSummary() {
+        skipped.fill(false)
+        offScriptMoments = 0
     }
 
     /** Makes the word at or after [tokenIndex] the next one to read, e.g. after a tap. */
@@ -89,6 +149,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         history.clear()
         utteranceAnchor = null
         utteranceWords = 0
+        utteranceMoved = false
     }
 
     fun restart() = jumpTo(0)
@@ -101,11 +162,20 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         // revised (same or fewer words) must not undo progress.
         val allowBack = spoken.size > utteranceWords
         utteranceWords = max(utteranceWords, spoken.size)
-        val tail = (history + spoken).takeLast(TAIL)
+        val tail = collapseNumbers(history + spoken) { false }.map { it.first }.takeLast(TAIL)
         if (tail.isEmpty()) return false
-        val target = bestPosition(tail, anchor, allowBack) ?: return false
+        val (target, match) = bestPosition(tail, anchor, allowBack) ?: return false
         if (target == wordCursor) return false
+        if (target > wordCursor) {
+            val firstMatched = min(match.first, target)
+            if (firstMatched - wordCursor > SKIP_REPORT) {
+                for (w in wordCursor + 1 until firstMatched) skipped[w] = true
+            } else {
+                for (w in wordCursor + 1..target) skipped[w] = false
+            }
+        }
         wordCursor = target
+        utteranceMoved = true
         return true
     }
 
@@ -113,7 +183,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
      * Scores every script position in the window as the place where [tail] ends and returns
      * the best one that clears the thresholds, or null to hold position.
      */
-    private fun bestPosition(tail: List<String>, anchor: Int, allowBack: Boolean): Int? {
+    private fun bestPosition(tail: List<String>, anchor: Int, allowBack: Boolean): Pair<Int, Match>? {
         // Searching behind the utterance's starting point keeps revised partials from pulling
         // the cursor back; the wider backward reach lets a deliberate re-read of the previous
         // sentence land where it starts.
@@ -123,7 +193,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         var best = Match.NONE
         for (j in lo..hi) {
             val m = align(tail, j)
-            if (!qualifies(j, m, allowBack) { run(tail, j) }) continue
+            if (!qualifies(j, m, allowBack) { exactRun(tail, j) }) continue
             val pos = bestPos
             if (pos == null || m.matches > best.matches ||
                 (m.matches == best.matches && closer(j, pos))
@@ -132,7 +202,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
                 best = m
             }
         }
-        return bestPos
+        return bestPos?.let { it to best }
     }
 
     /**
@@ -160,7 +230,7 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
     }
 
     /** Exact consecutive matches ending on script word [j] (containing a content word). */
-    private fun run(tail: List<String>, j: Int): Int {
+    private fun exactRun(tail: List<String>, j: Int): Int {
         var best = 0
         for (skip in 0..1) {
             var si = tail.lastIndex - skip
@@ -246,6 +316,82 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
         /** How far past the cursor a match may start and still count as reading on. */
         private const val CONTINUE_SLACK = 2
 
+        /** Jumps over more words than this are listed as skipped in the summary. */
+        private const val SKIP_REPORT = 3
+
+        /** An unmatched utterance this long counts as an off-script moment. */
+        private const val OFF_SCRIPT_WORDS = 4
+
+        /** What a whole spoken or written number collapses to. Too short to fuzzy-match a word. */
+        const val NUMBER = "#0"
+
+        private val NUMBER_WORDS = setOf(
+            // English
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+            "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+            "eighty", "ninety", "hundred", "thousand", "million", "billion", "trillion",
+            // Spanish (accents removed)
+            "cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+            "diez", "once", "doce", "trece", "catorce", "quince", "dieciseis", "diecisiete",
+            "dieciocho", "diecinueve", "veinte", "veintiuno", "veintidos", "veintitres",
+            "veinticuatro", "veinticinco", "veintiseis", "veintisiete", "veintiocho",
+            "veintinueve", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta",
+            "noventa", "cien", "ciento", "cientos", "doscientos", "trescientos",
+            "cuatrocientos", "quinientos", "seiscientos", "setecientos", "ochocientos",
+            "novecientos", "mil", "millon", "millones",
+        )
+
+        /** Words that belong to a number when they follow one: "fifty percent", "dos dólares". */
+        private val NUMBER_UNITS = setOf(
+            "dollar", "dollars", "cent", "cents", "percent", "bucks",
+            "dolar", "dolares", "centavo", "centavos", "porciento",
+        )
+
+        /** Words that join two parts of a number: "one hundred and five", "catorce con noventa". */
+        private val NUMBER_JOINERS = setOf("and", "point", "y", "con", "punto", "coma", "por")
+
+        private fun isNumberWord(word: String) = word in NUMBER_WORDS
+
+        /**
+         * Collapses every run of numbers and number words into a single [NUMBER] word, so
+         * "$14.99", "fourteen ninety nine" and "fourteen dollars and ninety nine cents" all
+         * read the same. Returns each resulting word with the range of input items it covers.
+         * [isDigits] marks items that are written numbers.
+         */
+        fun collapseNumbers(items: List<String>, isDigits: (Int) -> Boolean): List<Pair<String, IntRange>> {
+            fun numeric(i: Int) = i < items.size && (isDigits(i) || isNumberWord(items[i]))
+            val out = mutableListOf<Pair<String, IntRange>>()
+            var i = 0
+            while (i < items.size) {
+                if (!numeric(i)) {
+                    out += items[i] to i..i
+                    i++
+                    continue
+                }
+                val start = i
+                i++
+                while (i < items.size) {
+                    i = when {
+                        numeric(i) || items[i] in NUMBER_UNITS -> i + 1
+                        items[i] in NUMBER_JOINERS && (numeric(i + 1) || items.getOrNull(i + 1) in NUMBER_UNITS) -> i + 2
+                        else -> break
+                    }
+                }
+                out += NUMBER to (start until i)
+            }
+            return out
+        }
+
+        /**
+         * The script's words as a recognizer's vocabulary: lowercase with accents kept
+         * (speech models spell words with them), punctuation removed except apostrophes.
+         */
+        fun vocabulary(script: String): Set<String> =
+            tokenize(script).filter { it.kind == TokenKind.WORD }.flatMap { token ->
+                token.text.lowercase().split(Regex("[^\\p{L}']+")).map { it.trim('\'') }.filter { it.isNotEmpty() }
+            }.toSet()
+
         private val STOPWORDS = setOf(
             // English
             "a", "an", "the", "to", "of", "and", "or", "but", "in", "on", "at", "for", "with",
@@ -283,6 +429,13 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
             var i = 0
             while (i < script.length) {
                 val c = script[i]
+                if (c == '#' && (i == 0 || script[i - 1] == '\n' || script.substring(script.lastIndexOf('\n', i - 1) + 1, i).isBlank())) {
+                    var end = script.indexOf('\n', i)
+                    if (end < 0) end = script.length
+                    out += Token(script.substring(i, end).trimEnd(), i, i + script.substring(i, end).trimEnd().length, TokenKind.HEADING, "")
+                    i = end
+                    continue
+                }
                 if (c == '[') {
                     val close = script.indexOf(']', i)
                     if (close > i && script.substring(i, close).none { it == '\n' }) {
@@ -301,7 +454,8 @@ class ScriptTracker(script: String, var sensitivity: Sensitivity = Sensitivity.N
                 val norm = normalize(text)
                 val kind = when {
                     norm.isEmpty() -> TokenKind.SKIP
-                    text.any { it.isDigit() || it in SYMBOLS } -> TokenKind.SKIP
+                    text.any { it.isDigit() } -> TokenKind.NUMBER
+                    text.any { it in SYMBOLS } -> TokenKind.SKIP
                     else -> TokenKind.WORD
                 }
                 out += Token(text, i, j, kind, norm)

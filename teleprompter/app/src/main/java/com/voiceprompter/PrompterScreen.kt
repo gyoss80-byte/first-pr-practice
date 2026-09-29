@@ -2,9 +2,11 @@ package com.voiceprompter
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.camera.view.PreviewView
@@ -32,11 +34,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -80,13 +85,22 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.voiceprompter.tracker.PaceMeter
 import com.voiceprompter.tracker.ScriptTracker
+import com.voiceprompter.tracker.Section
 import com.voiceprompter.tracker.Sensitivity
 import com.voiceprompter.tracker.TokenKind
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-enum class Phase { Idle, Preparing, Countdown, Listening, Paused, Scrolling, Done }
+enum class Phase { Idle, Preparing, Countdown, Listening, Paused, Scrolling, Manual, Done }
+
+/** What the Done panel shows after a read-through. */
+data class ReadSummary(
+    val seconds: Int,
+    val wordsPerMinute: Int?,
+    val skipped: List<String>,
+    val offScript: Int,
+)
 
 private val NoteColor = Color(0xFF7FA7FF)
 private val Panel = Color(0xE6161A20)
@@ -103,6 +117,8 @@ class PrompterController(
     var cursorToken by mutableIntStateOf(tracker.cursorToken)
         private set
     var nextToken by mutableIntStateOf(tracker.nextToken)
+        private set
+    var nextTokenEnd by mutableIntStateOf(tracker.nextTokenEnd)
         private set
     var phase by mutableStateOf(Phase.Idle)
     var level by mutableFloatStateOf(0f)
@@ -122,7 +138,33 @@ class PrompterController(
 
     val running: Boolean
         get() = phase == Phase.Preparing || phase == Phase.Countdown ||
-            phase == Phase.Listening || phase == Phase.Scrolling
+            phase == Phase.Listening || phase == Phase.Scrolling || phase == Phase.Manual
+
+    /** Time spent reading (listening, scrolling or manual), for the summary. */
+    private var activeMs = 0L
+    private var activeSince: Long? = null
+
+    /** Call when [running] changes, so paused time isn't counted. */
+    fun onRunningChanged(running: Boolean) {
+        val now = SystemClock.elapsedRealtime()
+        if (running) {
+            if (activeSince == null) activeSince = now
+        } else {
+            activeSince?.let { activeMs += now - it }
+            activeSince = null
+        }
+    }
+
+    /** Summary of the read so far. Call before [takeSessionPace], which clears the pace. */
+    fun summary(): ReadSummary {
+        val now = SystemClock.elapsedRealtime()
+        val ms = activeMs + (activeSince?.let { now - it } ?: 0)
+        val skipped = tracker.skippedPassages().map { range ->
+            val words = tracker.tokens.slice(range).filter { it.kind != TokenKind.NOTE && it.kind != TokenKind.HEADING }
+            words.take(8).joinToString(" ") { it.text } + if (words.size > 8) "…" else ""
+        }
+        return ReadSummary((ms / 1000).toInt(), pace.sessionWordsPerMinute, skipped, tracker.offScriptMoments)
+    }
 
     /** Loads the script's speech model if needed, then calls [onReady]. */
     fun prepare(onReady: () -> Unit) {
@@ -141,10 +183,10 @@ class PrompterController(
         )
     }
 
-    fun startListening() {
+    fun startListening(vocabulary: Collection<String>? = null) {
         error = null
         micBlocked = false
-        phase = if (engine.start(script.lang, this)) Phase.Listening else Phase.Paused
+        phase = if (engine.start(script.lang, this, vocabulary)) Phase.Listening else Phase.Paused
     }
 
     fun stop(next: Phase = Phase.Paused) {
@@ -165,6 +207,9 @@ class PrompterController(
     fun restart() {
         if (running) stop()
         tracker.restart()
+        tracker.clearSummary()
+        activeMs = 0
+        activeSince = null
         pace.pause()
         lastWord = tracker.wordCursor
         sync()
@@ -174,6 +219,7 @@ class PrompterController(
     private fun sync() {
         cursorToken = tracker.cursorToken
         nextToken = tracker.nextToken
+        nextTokenEnd = tracker.nextTokenEnd
     }
 
     /** This session's average pace, once; null if too little was read to trust it. */
@@ -238,7 +284,16 @@ fun PrompterScreen(
             savePace()
         }
     }
-    LaunchedEffect(controller.phase) { if (controller.phase == Phase.Done) savePace() }
+    var summary by remember { mutableStateOf<ReadSummary?>(null) }
+    LaunchedEffect(controller.phase) {
+        if (controller.phase == Phase.Done) {
+            summary = controller.summary()
+            savePace()
+        } else if (controller.phase == Phase.Idle) {
+            summary = null
+        }
+    }
+    LaunchedEffect(controller.running) { controller.onRunningChanged(controller.running) }
     ImmersiveMode()
 
     val context = LocalContext.current
@@ -250,7 +305,12 @@ fun PrompterScreen(
     var countdownJob by remember { mutableStateOf<Job?>(null) }
     var controlsVisible by remember { mutableStateOf(true) }
     var touches by remember { mutableIntStateOf(0) }
-    val autoMode = settings.autoScroll
+    val mode = settings.scrollMode
+    // In Auto and Manual the text isn't tied to your voice: no highlight, no voice scrolling.
+    val autoMode = mode != ScrollMode.VOICE
+    val vocabulary = remember(script.text, script.lang, settings.scriptWords) {
+        if (settings.scriptWords) Vocabulary.forScript(script) else null
+    }
     val tokens = controller.tracker.tokens
     val phase = controller.phase
 
@@ -263,22 +323,26 @@ fun PrompterScreen(
     val cameraOn = settings.cameraOn && hasCamera
     var pendingRecord by remember { mutableStateOf(false) }
 
-    fun beginListening() {
-        controller.prepare {
-            if (settings.countdown) {
-                controller.phase = Phase.Countdown
-                countdownJob?.cancel()
-                countdownJob = scope.launch {
-                    for (n in 3 downTo 1) {
-                        countdown = n
-                        delay(1000)
-                    }
-                    if (controller.phase == Phase.Countdown) controller.startListening()
-                }
-            } else {
-                controller.startListening()
-            }
+    /** Runs [then] after the countdown from Settings (right away if it's off). */
+    fun withCountdown(then: () -> Unit) {
+        val seconds = settings.countdownSeconds
+        if (seconds <= 0) {
+            then()
+            return
         }
+        controller.phase = Phase.Countdown
+        countdownJob?.cancel()
+        countdownJob = scope.launch {
+            for (n in seconds downTo 1) {
+                countdown = n
+                delay(1000)
+            }
+            if (controller.phase == Phase.Countdown) then()
+        }
+    }
+
+    fun beginListening() {
+        controller.prepare { withCountdown { controller.startListening(vocabulary) } }
     }
 
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -292,13 +356,19 @@ fun PrompterScreen(
 
     fun play() {
         controller.error = null
-        if (controller.phase == Phase.Done) controller.restart()
-        if (autoMode) {
-            if (controller.phase == Phase.Done || scroll.value >= scroll.maxValue) {
-                scope.launch { scroll.scrollTo(0) }
+        val wasDone = controller.phase == Phase.Done
+        if (wasDone) controller.restart()
+        when (mode) {
+            ScrollMode.AUTO -> {
+                if (wasDone || scroll.value >= scroll.maxValue) scope.launch { scroll.scrollTo(0) }
+                withCountdown { controller.phase = Phase.Scrolling }
+                return
             }
-            controller.phase = Phase.Scrolling
-            return
+            ScrollMode.MANUAL -> {
+                withCountdown { controller.phase = Phase.Manual }
+                return
+            }
+            ScrollMode.VOICE -> {}
         }
         val granted = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -348,8 +418,8 @@ fun PrompterScreen(
             cameraPermissions.launch(recordPermissions)
             return
         }
-        if (controller.phase == Phase.Listening || controller.phase == Phase.Scrolling) {
-            camera.start(screenRotation())
+        if (controller.phase == Phase.Listening || controller.phase == Phase.Scrolling || controller.phase == Phase.Manual) {
+            camera.start(screenRotation(), script.displayTitle)
         } else {
             pendingRecord = true
             play()
@@ -358,23 +428,40 @@ fun PrompterScreen(
     LaunchedEffect(phase, pendingRecord) {
         if (!pendingRecord) return@LaunchedEffect
         when (phase) {
-            Phase.Listening, Phase.Scrolling -> {
+            Phase.Listening, Phase.Scrolling, Phase.Manual -> {
                 pendingRecord = false
-                camera.start(screenRotation())
+                camera.start(screenRotation(), script.displayTitle)
             }
             Phase.Paused -> pendingRecord = false
             else -> {}
         }
     }
     LaunchedEffect(cameraOn) {
-        if (cameraOn) camera.bind(context as ComponentActivity, settings.cameraFront) else camera.release()
+        if (cameraOn) {
+            camera.setUhd(settings.video4k)
+            camera.bind(context as ComponentActivity, settings.cameraFront)
+        } else {
+            camera.release()
+        }
     }
+    LaunchedEffect(settings.video4k) { camera.setUhd(settings.video4k) }
     LaunchedEffect(settings.cameraFront) { camera.useFront(settings.cameraFront) }
     LaunchedEffect(camera.message) {
         if (camera.message != null) {
-            delay(5000)
+            // Leave time to tap Share after a recording is saved.
+            delay(if (camera.lastVideo != null) 15_000 else 5000)
             camera.message = null
+            camera.lastVideo = null
         }
+    }
+    fun shareLastVideo() {
+        val uri = camera.lastVideo ?: return
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "video/mp4"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { context.startActivity(Intent.createChooser(send, "Share video")) }
     }
 
     fun showControls() {
@@ -388,6 +475,34 @@ fun PrompterScreen(
         return l.getLineTop(l.getLineForOffset(tokens[token].start)).toInt()
     }
 
+    fun goToSection(section: Section) {
+        showControls()
+        if (autoMode) {
+            scope.launch { scroll.animateScrollTo(lineTopOf(section.token), tween(320, easing = FastOutSlowInEasing)) }
+        } else {
+            controller.jumpTo(section.token)
+        }
+    }
+
+    /** Moves one line down (+1) or up (-1), for keyboard-style remotes. */
+    fun stepLine(delta: Int) {
+        val l = layout ?: return
+        val current = if (autoMode) {
+            l.getLineForVerticalPosition(scroll.value + 1f)
+        } else {
+            val focus = if (controller.nextToken >= 0) controller.nextToken else controller.cursorToken
+            if (focus < 0) 0 else l.getLineForOffset(tokens[focus].start)
+        }
+        val line = (current + delta).coerceIn(0, l.lineCount - 1)
+        if (autoMode) {
+            scope.launch { scroll.animateScrollTo(l.getLineTop(line).toInt(), tween(250)) }
+        } else {
+            val start = l.getLineStart(line)
+            val index = tokens.indexOfFirst { it.end > start }
+            if (index >= 0) controller.jumpTo(index)
+        }
+    }
+
     fun onWordTap(index: Int) {
         showControls()
         if (autoMode) {
@@ -395,6 +510,31 @@ fun PrompterScreen(
         } else {
             controller.jumpTo(index)
         }
+    }
+
+    // Bluetooth remotes and keyboards: play/pause keys start and pause, arrows and page keys
+    // move a line at a time.
+    val activity = context as? MainActivity
+    DisposableEffect(activity) {
+        activity?.keyHandler = handler@{ event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@handler REMOTE_KEYS.contains(event.keyCode)
+            showControls()
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+                KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_DPAD_CENTER,
+                -> if (controller.running) pause() else play()
+                KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                -> stepLine(1)
+                KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                -> stepLine(-1)
+                else -> return@handler false
+            }
+            true
+        }
+        onDispose { activity?.keyHandler = null }
     }
 
     // Leaving the app pauses; coming back picks up where it was.
@@ -467,7 +607,7 @@ fun PrompterScreen(
 
     val textColor = Color(settings.textColor)
     val highlight = Color(settings.highlightColor)
-    val text = remember(script.text, controller.cursorToken, controller.nextToken, textColor, highlight, autoMode) {
+    val text = remember(script.text, controller.cursorToken, controller.nextToken, controller.nextTokenEnd, textColor, highlight, autoMode, settings.fontSize) {
         buildAnnotatedString {
             append(script.text)
             val readEnd = if (!autoMode && controller.cursorToken >= 0) tokens[controller.cursorToken].end else 0
@@ -476,9 +616,17 @@ fun PrompterScreen(
                 val color = if (it.end <= readEnd) NoteColor.copy(alpha = 0.35f) else NoteColor
                 addStyle(SpanStyle(color = color, fontStyle = FontStyle.Italic), it.start, it.end)
             }
+            tokens.filter { it.kind == TokenKind.HEADING }.forEach {
+                val color = if (it.end <= readEnd) highlight.copy(alpha = 0.35f) else highlight
+                addStyle(
+                    SpanStyle(color = color, fontWeight = FontWeight.Bold, fontSize = (settings.fontSize * 0.7f).sp, letterSpacing = 0.5.sp),
+                    it.start, it.end,
+                )
+            }
             if (!autoMode && controller.nextToken >= 0) {
-                val t = tokens[controller.nextToken]
-                addStyle(SpanStyle(color = Color.Black, background = highlight), t.start, t.end)
+                val first = tokens[controller.nextToken]
+                val last = tokens[controller.nextTokenEnd.coerceAtLeast(controller.nextToken)]
+                addStyle(SpanStyle(color = Color.Black, background = highlight), first.start, last.end)
             }
         }
     }
@@ -588,10 +736,17 @@ fun PrompterScreen(
                 Modifier.align(Alignment.Center),
             )
         }
-        camera.message?.let { Banner(it, Modifier.align(Alignment.Center)) }
+        camera.message?.let { msg ->
+            Banner(
+                msg,
+                Modifier.align(Alignment.Center),
+                action = if (camera.lastVideo != null) "Share" to ::shareLastVideo else null,
+            )
+        }
 
         CenterMessage(
             controller, countdown, highlight,
+            summary = summary,
             recording = camera.isRecording,
             onRestart = {
                 controller.restart()
@@ -602,7 +757,27 @@ fun PrompterScreen(
 
         if (controlsVisible) {
             Box(Modifier.fillMaxSize().safeDrawingPadding().padding(12.dp)) {
-                PillButton("‹ Edit", Modifier.align(Alignment.TopStart), onClick = onBack)
+                Row(Modifier.align(Alignment.TopStart), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    PillButton("‹ Edit", onClick = onBack)
+                    val sections = controller.tracker.sections
+                    if (sections.isNotEmpty()) {
+                        var open by remember { mutableStateOf(false) }
+                        Box {
+                            PillButton("Sections") { open = true }
+                            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                                sections.forEach { section ->
+                                    DropdownMenuItem(
+                                        text = { Text(section.title.ifEmpty { "Untitled section" }) },
+                                        onClick = {
+                                            open = false
+                                            goToSection(section)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 Column(
                     Modifier.align(Alignment.BottomCenter),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -611,8 +786,10 @@ fun PrompterScreen(
                     if (phase == Phase.Idle) {
                         Text(
                             when {
+                                cameraOn && mode == ScrollMode.MANUAL -> "Tap the red button to record. Scroll the text with your finger."
                                 cameraOn -> "Tap the red button to record and start the prompter together."
-                                autoMode -> "Auto-scroll is on. Tap play to start."
+                                mode == ScrollMode.AUTO -> "Auto-scroll is on. Tap play to start."
+                                mode == ScrollMode.MANUAL -> "Manual mode: scroll the text with your finger."
                                 else -> "Tap play, then start reading. Tap any word to start there."
                             },
                             color = Color(0xFFB9BEC6),
@@ -644,9 +821,11 @@ fun PrompterScreen(
                             onClick = { if (running) pause() else play() },
                         )
                         PillButton("A+") { onSettingsChange(settings.copy(fontSize = (settings.fontSize + 4).coerceAtMost(96f))) }
-                        PillButton(if (autoMode) "Auto" else "Voice") {
+                        // Cycles Voice → Auto → Manual.
+                        PillButton(mode.label) {
                             if (running) pause()
-                            onSettingsChange(settings.copy(autoScroll = !autoMode))
+                            val next = ScrollMode.entries[(mode.ordinal + 1) % ScrollMode.entries.size]
+                            onSettingsChange(settings.copy(scrollMode = next))
                         }
                     }
                 }
@@ -660,6 +839,7 @@ private fun CenterMessage(
     controller: PrompterController,
     countdown: Int,
     highlight: Color,
+    summary: ReadSummary?,
     recording: Boolean,
     onRestart: () -> Unit,
     onBack: () -> Unit,
@@ -677,11 +857,12 @@ private fun CenterMessage(
             controller.phase == Phase.Done && recording -> Message("Done. Tap the red button to stop recording.")
 
             controller.phase == Phase.Done -> Column(
-                Modifier.clip(RoundedCornerShape(16.dp)).background(Panel).padding(24.dp),
+                Modifier.padding(24.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text("Done.", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.SemiBold)
+                if (summary != null) SummaryDetails(summary, highlight)
                 Button(onClick = onRestart) { Text("Read again") }
                 OutlinedButton(onClick = onBack) { Text("Back to editor", color = Color.White) }
             }
@@ -772,16 +953,54 @@ private fun RecordButton(recording: Boolean, onClick: () -> Unit) {
     }
 }
 
+/** Time, pace, skipped passages and ad-libs from the read-through just finished. */
 @Composable
-private fun Banner(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        color = Color.White,
-        fontSize = 15.sp,
-        textAlign = TextAlign.Center,
-        modifier = modifier.padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Panel).padding(16.dp),
-    )
+private fun SummaryDetails(summary: ReadSummary, highlight: Color) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.widthIn(max = 420.dp)) {
+        val stats = listOfNotNull(
+            "Time ${ReadTime.format(summary.seconds)}",
+            summary.wordsPerMinute?.let { "$it wpm" },
+            when (summary.offScript) {
+                0 -> null
+                1 -> "1 time off-script"
+                else -> "${summary.offScript} times off-script"
+            },
+        ).joinToString("  ·  ")
+        Text(stats, color = Color(0xFFD5D8DD), fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+        if (summary.skipped.isEmpty()) {
+            Text("Nothing skipped.", color = Color(0xFF9BE8A6), fontSize = 15.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+        } else {
+            Text("SKIPPED", color = highlight, fontSize = 12.sp, letterSpacing = 1.sp)
+            summary.skipped.take(4).forEach {
+                Text("“$it”", color = Color(0xFFD5D8DD), fontSize = 15.sp, fontStyle = FontStyle.Italic)
+            }
+            if (summary.skipped.size > 4) {
+                Text("and ${summary.skipped.size - 4} more", color = Color(0xFF8A8F98), fontSize = 14.sp)
+            }
+        }
+    }
 }
+
+@Composable
+private fun Banner(text: String, modifier: Modifier = Modifier, action: Pair<String, () -> Unit>? = null) {
+    Row(
+        modifier.padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Panel).padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(text, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f, fill = false))
+        if (action != null) Button(onClick = action.second) { Text(action.first) }
+    }
+}
+
+/** Keys a Bluetooth remote or keyboard may send; the prompter handles both press and release. */
+private val REMOTE_KEYS = setOf(
+    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+    KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER,
+    KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_DPAD_CENTER,
+    KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_NEXT,
+    KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+)
 
 /** Live words per minute; turns into a "Slow down" warning when you're over the target. */
 @Composable
